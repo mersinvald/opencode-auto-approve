@@ -1,0 +1,34 @@
+{
+  "grantRules": [
+    {
+      "operation": "files.access",
+      "target": "/path/to/shared-repository",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "files.read",
+      "target": "/path/to/shared-repository",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "files.list",
+      "target": "/path/to/shared-repository",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "git.read",
+      "target": "/path/to/shared-repository",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "shell.stream",
+      "target": "/path/to/shared-repository",
+      "targetType": "directory",
+      "mode": "allow"
+    }
+  ]
+}

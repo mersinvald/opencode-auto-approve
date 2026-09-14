@@ -1,5 +1,7 @@
 # Configuration
 
+The [starter rule catalog](starter-rules.md) lists the built-in defaults and optional policy examples. A normal installation includes these defaults automatically.
+
 ## Classifier provider
 
 The plugin reads `opencode.json` beside its policy file. The file must belong to the current user and have mode `0600`.

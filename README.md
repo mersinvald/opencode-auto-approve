@@ -68,6 +68,14 @@ Detailed local records support deeper investigation. They describe permission de
 
 On macOS, notifications alert you when review escalates, fails, or remains pending for five minutes. Run **`/approval-notification-test`** to check notification delivery.
 
+## Start with useful defaults
+
+The plugin starts with rules for project reads, read-only Git inspection, `AGENTS.md`, skill reads, task scratch files, and agent coordination. Targets follow the current session and your configured directories.
+
+The installer includes these rules automatically. Project edits, test execution, and Beads updates use model review until you or the model save suitable permissions.
+
+See the [starter rule catalog](docs/starter-rules.md) for defaults, optional JSON examples, and local shell setup requirements.
+
 ## Get started
 
 Requirements: **OpenCode 2.0.2**, Node.js 22+, Python 3.10+, and Go 1.26+. OpenCode 1.x and Windows are not supported.

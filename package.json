@@ -27,7 +27,8 @@
     "shell-parser/LICENSE.mvdan-sh",
     "docs",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "examples/*.json"
   ],
   "scripts": {
     "build:parser": "python3 build_static.py",
@@ -36,8 +37,8 @@
     "test:native": "python3 run_native_tests.py",
     "test:tui": "python3 test_grant_tui.py",
     "test:model": "node evaluate_grant_model.mjs",
-    "check": "prettier --check \"*.mjs\" \"*.json\" \"docs/*.md\" \"*.md\" \".github/workflows/*.yml\"",
-    "format": "prettier --write \"*.mjs\" \"*.json\" \"docs/*.md\" \"*.md\" \".github/workflows/*.yml\""
+    "check": "prettier --check \"*.mjs\" \"*.json\" \"docs/*.md\" \"examples/*.json\" \"*.md\" \".github/workflows/*.yml\"",
+    "format": "prettier --write \"*.mjs\" \"*.json\" \"docs/*.md\" \"examples/*.json\" \"*.md\" \".github/workflows/*.yml\""
   },
   "peerDependencies": {
     "@opencode/plugin": "2.0.2"

@@ -1,0 +1,43 @@
+{
+  "grantRules": [
+    {
+      "operation": "files.write",
+      "target": "/path/to/repository/src",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "files.write",
+      "target": "/path/to/repository/tests",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "tests.run",
+      "target": "/path/to/repository/tests",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "beads.read",
+      "target": "/path/to/repository",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "beads.update",
+      "target": "/path/to/repository",
+      "targetType": "directory",
+      "mode": "allow"
+    },
+    {
+      "operation": "beads.manage",
+      "target": "/path/to/repository",
+      "targetType": "directory",
+      "mode": "allow"
+    }
+  ],
+  "staticShell": {
+    "beadsWriters": ["orchestrator"]
+  }
+}
