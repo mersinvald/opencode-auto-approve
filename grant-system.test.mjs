@@ -1,4 +1,9 @@
 import test from 'node:test';
+const sandboxWrapper =
+  process.platform === 'darwin'
+    ? "/usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' "
+    : '';
+
 import assert from 'node:assert/strict';
 import {
   mkdtemp,
@@ -53,6 +58,16 @@ const config = {
     beadsWriters: ['orchestrator'],
   },
 };
+const pythonPath = '/usr/bin/python3';
+config.staticShell.executables = [
+  {
+    name: 'python3',
+    path: pythonPath,
+    realpath: (await import('node:fs')).realpathSync(pythonPath),
+    sha256: sha256(await readFile(pythonPath)),
+  },
+];
+
 const scope = { directory: repo, scratch: base + '/scratch', agent: 'orchestrator' };
 const permissions = {
   projectID: 'pwa',
@@ -1023,7 +1038,7 @@ test('literal command arrays normalize Beads operation and repository without in
       executables: [{ name: 'bd', path: bin, realpath: bin, sha256: sha256(await readFile(bin)) }],
     },
   };
-  const command = `P='${root}'; BD=(/usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' '${bin}' --sandbox --dolt-auto-commit off -C "$P"); "\${BD[@]}" update fixture --status in_progress`;
+  const command = `P='${root}'; BD=(${sandboxWrapper}'${bin}' --sandbox --dolt-auto-commit off -C "$P"); "\${BD[@]}" update fixture --status in_progress`;
   const r = shell(command),
     p = {
       scope,

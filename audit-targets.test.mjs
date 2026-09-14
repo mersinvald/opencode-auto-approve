@@ -1,4 +1,9 @@
 import test from 'node:test';
+const sandboxWrapper =
+  process.platform === 'darwin'
+    ? "/usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' "
+    : '';
+
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, lstat, chmod, symlink, open } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -179,7 +184,7 @@ test('inspection filters normalize data programs and flag arguments', async () =
 function beadsCommand(payload = '{"next":"continue"}') {
   return `set -e
 S='${scratch}'; P='${repo}'
-BD=(/usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' '${base}/bd' --sandbox --dolt-auto-commit off --actor fixture -C "$P")
+BD=(${sandboxWrapper}'${base}/bd' --sandbox --dolt-auto-commit off --actor fixture -C "$P")
 cat > "$S/data.json" <<'EOF'
 ${payload}
 EOF

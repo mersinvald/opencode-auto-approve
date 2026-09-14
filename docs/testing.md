@@ -48,7 +48,7 @@ The workflow runs on the dedicated `opencode-auto-approve` infrastructure runner
 
 The runner image contains Python, SQLite, and system shell tools. Pinned setup actions install Node and Go. `npm ci` installs dependencies from the lockfile.
 
-Repository variables provide the endpoint, model identifier, and reasoning effort. The API key is a repository Actions secret. Only the model test step receives it.
+Repository variables provide the model identifier and reasoning effort. The endpoint and API key are repository Actions secrets. Only the model test step receives them.
 
 The workflow accepts trusted pushes to `main` and manual runs of `main`. It has no pull request trigger. Review contributor changes before admitting them to that branch. Do not modify the workflow to execute untrusted code inside the home infrastructure.
 

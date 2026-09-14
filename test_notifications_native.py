@@ -41,7 +41,8 @@ const worker=await client.session.import(transfer);
 assert.equal((await client.session.get({sessionID:worker.id})).parentID,main.id);
 const log=base+'/audit/'+new Date().toISOString().slice(0,10)+'.jsonl';
 let clock=Date.now();const sends=[];
-const monitor=createApprovalNotifications({client,policyFile:base+'/policy.json',now:()=>clock,
+// Simulate macOS notification decisions on every test host. Delivery is a stub.
+const monitor=createApprovalNotifications({client,platform:'darwin',policyFile:base+'/policy.json',now:()=>clock,
  notify:async x=>{sends.push(x);return {notification:true};},onError:x=>{throw Error(x);}});
 const create=async(session,status,code)=>{
  const request=await client.permission.create({sessionID:session.id,agent:'build',action:'shell',resources:['synthetic fixture; never execute']});

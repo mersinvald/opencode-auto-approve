@@ -47,7 +47,7 @@ jobs:
         run: npm run test:tui
       - name: Test model decisions with synthetic inputs
         env:
-          APPROVAL_MODEL_BASE_URL: ${{ vars.APPROVAL_MODEL_BASE_URL }}
+          APPROVAL_MODEL_BASE_URL: ${{ secrets.APPROVAL_MODEL_BASE_URL }}
           APPROVAL_MODEL_ID: ${{ vars.APPROVAL_MODEL_ID }}
           APPROVAL_MODEL_REASONING: ${{ vars.APPROVAL_MODEL_REASONING }}
           APPROVAL_MODEL_API_KEY: ${{ secrets.APPROVAL_MODEL_API_KEY }}
