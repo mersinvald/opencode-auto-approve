@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { gate } from './grant-gate.mjs';
 import { sha256, attestRuntime } from './shell-host.mjs';
 import { reviewPrompt } from './grant-decision.mjs';
+import { grantSnapshot } from './audit-grants.mjs';
 
 const base = await mkdtemp(
     (await import('node:fs')).realpathSync((await import('node:os')).tmpdir()) +
@@ -175,6 +176,85 @@ test('inspection filters normalize data programs and flag arguments', async () =
     'grep -r ref .',
   ])
     await incomplete(command);
+});
+
+test('argumentless echo is complete and does not stop later command analysis', async () => {
+  for (const command of ['echo', "echo ''; echo; echo ---", 'echo >/dev/null']) {
+    const result = await allowed(command);
+    assert.equal(result.analysis.complete, true);
+    assert.deepEqual(result.analysis.unresolved, []);
+    assert.ok(
+      result.analysis.grants.every((g) => ['files.access', 'shell.stream'].includes(g.operation)),
+    );
+  }
+  const result = await allowed("echo 'manifest'; echo; cat contracts/common.json");
+  assert.deepEqual(
+    result.analysis.commands.map((c) => c.argv[0]),
+    ['echo', 'echo', 'cat'],
+  );
+  assert.ok(
+    result.analysis.grants.some(
+      (g) => g.operation === 'files.read' && g.target === repo + '/contracts/common.json',
+    ),
+  );
+});
+
+test('argumentless echo redirects and later deletions still require their own grants', async () => {
+  const output = repo + '/echo-output';
+  for (const command of [`echo > '${output}'`, `{ echo title; echo; } >> '${output}'`]) {
+    const result = await inspect(command, { state: { rules: [rule('files.write', repo, 'ask')] } });
+    assert.equal(result.analysis.complete, true);
+    assert.equal(result.decision, 'ask');
+    assert.ok(
+      result.analysis.grants.some((g) => g.operation === 'files.write' && g.target === output),
+    );
+  }
+  const cleanup = scratch + '/echo-cleanup';
+  await mkdir(cleanup);
+  await writeFile(cleanup + '/keep', 'preserved');
+  const deletion = await inspect(`echo; rm -rf '${cleanup}'`, {
+    state: { rules: [rule('files.delete', scratch, 'ask')] },
+  });
+  assert.equal(deletion.analysis.complete, true);
+  assert.equal(deletion.decision, 'ask');
+  assert.ok(deletion.analysis.grants.some((g) => g.operation === 'files.delete'));
+  assert.equal(await readFile(repo + '/contracts/common.json', 'utf8'), '{"$ref":"common.json"}\n');
+  assert.equal(await readFile(cleanup + '/keep', 'utf8'), 'preserved');
+  await assert.rejects(lstat(output), { code: 'ENOENT' });
+});
+
+test('echo still validates substitutions, environment, and executable identity', async () => {
+  await incomplete(`echo; echo "$(touch '${scratch}/unexpected')"`);
+  await assert.rejects(lstat(scratch + '/unexpected'), { code: 'ENOENT' });
+  await incomplete(`echo; '${base}/unverified-echo'`);
+  await incomplete('printf');
+  await incomplete('printf -v VAR data');
+  const command = 'echo';
+  const result = await inspect(command, {
+    runtime: {
+      command,
+      cwd: repo,
+      shell: '/bin/bash',
+      env: { PATH: '/usr/bin:/bin', 'BASH_FUNC_echo%%': '() { touch /tmp/unexpected; }' },
+    },
+  });
+  assert.equal(result.analysis.complete, false);
+  assert.notEqual(result.decision, 'allow');
+});
+
+test('unsupported syntax after echo points to the shell node, not the previous command', async () => {
+  const result = await incomplete('echo\nwhile read -r f; do echo "$f"; done');
+  assert.deepEqual(
+    result.analysis.commands.map((c) => c.argv),
+    [['echo']],
+  );
+  const diagnostic = grantSnapshot(result).unresolved[0];
+  assert.equal(diagnostic.reason, 'shell_syntax:WhileClause');
+  assert.equal(diagnostic.commandIndex, null);
+  assert.equal(diagnostic.command, undefined);
+  assert.equal(diagnostic.source, '<shell>');
+  assert.equal(diagnostic.line, 2);
+  assert.equal(diagnostic.column, 1);
 });
 
 function beadsCommand(payload = '{"next":"continue"}') {

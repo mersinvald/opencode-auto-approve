@@ -103,6 +103,7 @@ export default {id:'local.approval-review', async setup(ctx) {
                 time.sleep(.05)
             raise AssertionError('Timeout: '+str(base))
         cases = [('reads',f"cd '{repo}' && grep -n hello file; grep -n world file"),
+                 ('empty_echo', "echo; echo 'manifest'; echo; cat file"),
                  ('probe','if grep -q hello file; then cat file; else head -n 1 file; fi'),
                  ('env_regex','set -euo pipefail; LC_ALL=C grep -n "hello\\|world" file'),
                  ('glob_read','cat fi*'),

@@ -12,8 +12,8 @@ import { sedInvocation } from './sed-inspection.mjs';
 import { sqliteRead } from './sqlite-read.mjs';
 import { safeMetadataFilter, gitInspection } from './shell-inspection.mjs';
 
-const fail = (reason) => {
-  throw Error(reason);
+const fail = (reason, diagnostic) => {
+  throw Object.assign(Error(reason), { diagnostic });
 };
 const jsonKind = (value) => {
   try {
@@ -114,6 +114,7 @@ export async function extractAction(request, { scope, config, runtime, permissio
   };
   let complete = true,
     reason,
+    failureDiagnostic,
     host,
     syntax;
   const authority = new Set(config.staticShell?.zshStartup?.files?.map((f) => f.path) ?? []);
@@ -241,11 +242,12 @@ export async function extractAction(request, { scope, config, runtime, permissio
             return;
           fail('shell_options');
         }
+        if (name === 'echo') return;
         if (
-          ['printf', 'echo'].includes(name) &&
+          name === 'printf' &&
           args.length &&
-          (name === 'echo' || !args[0].startsWith('-')) &&
-          (name !== 'printf' || !/%/.test(args[0]) || ['%s', '%s\\n', '%s\n'].includes(args[0]))
+          !args[0].startsWith('-') &&
+          (!/%/.test(args[0]) || ['%s', '%s\\n', '%s\n'].includes(args[0]))
         )
           return;
         if (['test', '['].includes(name)) {
@@ -1235,7 +1237,13 @@ export async function extractAction(request, { scope, config, runtime, permissio
           }
           return states;
         }
-        if (cmd?.Type !== 'CallExpr') fail('shell_syntax');
+        if (cmd?.Type !== 'CallExpr')
+          fail('shell_syntax:' + (cmd?.Type ?? 'unknown'), {
+            commandIndex: null,
+            source: '<shell>',
+            line: stmt.Pos?.Line,
+            column: stmt.Pos?.Col,
+          });
         const inline = !!cmd.Args?.length;
         if (cmd.Assigns?.length && !inline && stmt.Redirs?.length) fail('assignment_redirection');
         if (cmd.Assigns?.length && piped && !inline) fail('command_environment');
@@ -1385,6 +1393,7 @@ export async function extractAction(request, { scope, config, runtime, permissio
   } catch (error) {
     complete = false;
     reason = error.message;
+    failureDiagnostic = error.diagnostic;
   }
   return {
     complete,
@@ -1395,7 +1404,13 @@ export async function extractAction(request, { scope, config, runtime, permissio
           ...pythonUnresolved,
           ...shellUnresolved,
           ...(reason
-            ? [{ reason, commandIndex: commands.length ? commands.length - 1 : null }]
+            ? [
+                {
+                  reason,
+                  commandIndex: commands.length ? commands.length - 1 : null,
+                  ...failureDiagnostic,
+                },
+              ]
             : []),
         ],
     constraints,
