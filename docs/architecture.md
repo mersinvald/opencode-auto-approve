@@ -64,3 +64,11 @@ Bounded file, Beads, and test rules keep their scope and provenance. Verified wo
 Legacy command-specific Always ask rules cannot safely become atomic rules automatically. Such a restriction retains an escalation guard (`legacyShellAsk` or `legacyNativeAsk`) until an administrator replaces it with explicit atomic restrictions. Remove that guard only after restoring the intended restrictions. Normal allow and Dynamic migrations need no manual step.
 
 The model receives the current request, authority context, relevant atomic permissions, and candidate scopes. Unrelated grant history and repeated native permission records remain outside its prompt. Detailed analysis remains available in the private audit.
+
+## Grant audit details
+
+The audit stores a compact grant snapshot before large command and helper evidence. It records parse coverage, unresolved commands, atomic grants, and the rules that matched at decision time.
+
+After a successful model rule save, the audit records the previous and new exact rules. It also resolves affected grants before and after that transaction. A proposed rule does not count as saved. Audit enrichment cannot block the store transaction.
+
+`oc-approvals --details` displays these snapshots as readable text. `--json` includes the full stored payload. Missing, truncated, or unavailable evidence remains explicit. For older save events, the pretty viewer can recover earlier analysis from the same request within its bounded log scan.

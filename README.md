@@ -74,6 +74,8 @@ For a separate terminal view:
 
 ```sh
 oc-approvals --follow
+oc-approvals --details --limit 5
+oc-approvals --json --limit 1
 ```
 
 Detailed local records support deeper investigation. They describe permission decisions, not proof that a command ran or succeeded. See [audit data and privacy](SECURITY.md).
@@ -87,6 +89,12 @@ The plugin starts with rules for project reads, read-only Git inspection, `AGENT
 The installer includes these rules automatically. Project edits, test execution, and Beads updates need an AI decision until you or the model save suitable permissions.
 
 See the [starter rule catalog](docs/starter-rules.md) for defaults, optional JSON examples, and local shell setup requirements.
+
+`--details` expands each entry with parsed grants, their states, matched rules, and unresolved effects. Saved-model events show which rules changed and the resulting grant states.
+
+These states describe the recorded decision and save transaction. They do not reinterpret old decisions using today's rules. Older records show the available evidence and identify missing change history.
+
+`--json` emits JSON Lines with the complete stored detail payload. This replaces the previous `--details` JSON output. Combine either format with `--follow`, `--session`, or `--decision`.
 
 ## Get started
 

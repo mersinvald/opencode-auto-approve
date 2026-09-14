@@ -102,6 +102,13 @@ export default {id:'local.approval-review',async setup(ctx){
         assert len([c for c in calls() if c['name']=='concurrent'])==1;checks.append('unrelated_rule_change_preserves_review_and_save')
         sid,r=case('remember');assert r['effect']=='ask';assert wait(lambda:final(r['id']))['status']=='allow'
         wait(lambda:any(x.get('code')=='model_rules_saved' and x.get('sessionID')==sid for x in rows()))
+        saved_row=next(x for x in reversed(rows()) if x.get('code')=='model_rules_saved' and x.get('sessionID')==sid)
+        saved_detail=json.loads((base/'audit'/saved_row['details']['path']).read_text())['data']
+        update=saved_detail['lifecycle']['ruleUpdate']
+        assert update['status']=='saved' and update['changes'][0]['after']['authority']=='model',update
+        assert update['before'][0]['mode']=='dynamic' and update['after'][0]['mode']=='allow',update
+        assert saved_detail['grants']['entries'][0]['grant']['operation']=='files.write',saved_detail
+        checks.append('saved_rule_audit_has_grants_and_state_transition')
         count=len(calls());child,r2=case('reuse','remember');assert r2['effect']=='allow',r2;assert len(calls())==count;checks.append('allow_always_reused_across_sessions')
         set_rule(child,'remember','ask');_,r3=case('ask_rule','remember');assert r3['effect']=='ask';assert wait(lambda:final(r3['id']))['status']=='ask';assert len(calls())==count;checks.append('always_ask_skips_model')
         set_rule(child,'remember','dynamic');_,r4=case('dynamic','remember');assert r4['effect']=='ask';assert wait(lambda:final(r4['id']))['status']=='allow';assert len(calls())==count+1;checks.append('dynamic_calls_model')

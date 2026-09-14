@@ -1,3 +1,5 @@
+import { grantSnapshot } from './audit-grants.mjs';
+import { grantLabel, modeLabels } from './grant-rules.mjs';
 import { open, readdir, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -90,6 +92,7 @@ export async function readAudit(
     excludeKeys,
     accept,
     maxFileBytes = 1024 * 1024,
+    includePriorDetails = false,
   } = {},
 ) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 200)
@@ -110,7 +113,8 @@ export async function readAudit(
     throw error;
   }
   const records = [],
-    seen = new Set();
+    seen = new Set(),
+    waiting = new Map();
   let skipped = 0,
     limited = false;
   for (const name of names) {
@@ -154,9 +158,18 @@ export async function readAudit(
       // Filter only the latest state of each asynchronous permission request.
       if (record.requestID) {
         const key = record.sessionID + ':' + record.requestID;
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {
+          if (waiting.has(key) && record.details?.status === 'stored') {
+            waiting.get(key).priorDetails = record.details;
+            waiting.delete(key);
+          }
+          if (records.length >= limit && !waiting.size)
+            return { records: records.reverse(), skipped, limited };
+          continue;
+        }
         seen.add(key);
       }
+      if (records.length >= limit) continue;
       // A V1 proposal is not evidence of the final permission result.
       if (requests && !requests.has(record.requestID)) continue;
       if (excludeKeys?.has(record.sessionID + ':' + (record.requestID || record.sourceID)))
@@ -174,7 +187,15 @@ export async function readAudit(
       if (session && record.sessionID !== session) continue;
       if (modelOnly && !record.model) continue;
       records.push(record);
-      if (records.length >= limit) return { records: records.reverse(), skipped, limited };
+      if (
+        includePriorDetails &&
+        record.requestID &&
+        record.details?.status !== 'stored' &&
+        ['scoped_grant_created', 'scope_not_saved'].includes(record.status)
+      )
+        waiting.set(record.sessionID + ':' + record.requestID, record);
+      if (records.length >= limit && !waiting.size)
+        return { records: records.reverse(), skipped, limited };
     }
   }
   return { records: records.reverse(), skipped, limited };
@@ -214,6 +235,103 @@ export function formatRecord(record) {
   return lines.join('\n');
 }
 
+const array = (value) => (Array.isArray(value) ? value : []);
+const objects = (value) => array(value).filter((x) => x && typeof x === 'object');
+const modeName = (value) =>
+  Object.hasOwn(modeLabels, value) ? modeLabels[value] : 'State not recorded';
+const atomLabel = (g) =>
+  `${safeText(g?.operation, 160)}  ${safeText(g?.target ? (g.space && typeof g.space.repository === 'string' ? grantLabel(g) : g.target) : '[target not recorded]', 1200)} (${safeText(g?.targetType, 20)})`;
+const ruleLabel = (r) =>
+  r
+    ? `${safeText(r.authority ?? 'unknown', 40)}/${safeText(r.scope ?? 'unknown', 40)} · ${atomLabel(r)}${r.source ? ' · ' + safeText(r.source, 100) : ''}`
+    : 'no matching rule';
+
+export function formatDetailedRecord(record) {
+  const lines = [formatRecord(record)],
+    data = record.detail?.data;
+  if (!data) {
+    lines.push(
+      `  Grant details unavailable: ${safeText(record.detailError ?? record.details?.code ?? 'not stored for this event')}`,
+    );
+    return lines.join('\n');
+  }
+  const snapshot = data.grants ?? grantSnapshot(data.diagnostics?.static);
+  if (snapshot) {
+    const entries = objects(snapshot.entries);
+    lines.push(
+      `  Analysis: ${snapshot.complete === true ? 'complete' : snapshot.complete === false ? 'incomplete' : 'coverage not recorded'} · ${entries.length} atomic grant${entries.length === 1 ? '' : 's'}`,
+    );
+    if (snapshot.restriction) lines.push('    Restriction: ' + safeText(snapshot.restriction, 800));
+    lines.push('  Grants at decision:');
+    if (!entries.length) lines.push('    No atomic grants identified.');
+    for (const e of entries) {
+      lines.push(`    ${modeName(e.mode)} · ${atomLabel(e.grant)}`);
+      lines.push('      via ' + ruleLabel(e.rule));
+      if (e.grant?.physicalTarget)
+        lines.push('      resolved: ' + safeText(e.grant.physicalTarget, 1200));
+      if (e.grant?.space?.repository)
+        lines.push('      repository: ' + safeText(e.grant.space.repository, 64));
+    }
+    const unresolved = objects(snapshot.unresolved);
+    if (unresolved.length) {
+      lines.push('  Unresolved effects (require review):');
+      for (const u of unresolved) {
+        lines.push(
+          `    ${safeText(u.reason ?? snapshot.reason ?? 'not recorded', 600)}${Number.isInteger(u.commandIndex) ? ' · command ' + (u.commandIndex + 1) : ''}`,
+        );
+        if (u.command?.argv)
+          lines.push(
+            '      ' +
+              safeText(
+                array(u.command.argv)
+                  .map((x) => (typeof x === 'string' ? JSON.stringify(x) : '[dynamic value]'))
+                  .join(' '),
+                1200,
+              ),
+          );
+      }
+    }
+  } else lines.push('  Grant analysis was not recorded for this event.');
+  const update = data.lifecycle?.ruleUpdate;
+  if (update?.status === 'saved') {
+    lines.push('  Rule changes saved:');
+    for (const c of objects(update.changes)) {
+      lines.push('    ' + atomLabel(c.after));
+      lines.push(
+        `      ${c.before ? modeName(c.before.mode) : 'No exact rule'} → ${modeName(c.after?.mode)} · ${safeText(c.after?.authority, 40)}/${safeText(c.after?.scope, 40)}`,
+      );
+    }
+    const before = new Map(objects(update.before).map((e) => [e.grant?.id, e]));
+    for (const after of objects(update.after)) {
+      const prior = before.get(after.grant?.id);
+      if (prior?.mode === after.mode) continue;
+      lines.push(
+        `    Grant state: ${modeName(prior?.mode)} → ${modeName(after.mode)} · ${atomLabel(after.grant)}`,
+      );
+      lines.push('      via ' + ruleLabel(after.rule));
+    }
+    if (update.stateError)
+      lines.push('    Grant-state comparison unavailable: ' + safeText(update.stateError));
+  } else if (update?.status === 'failed' || record.code === 'rule_save_failed') {
+    lines.push('  Rule changes: NOT SAVED · ' + safeText(update?.reason ?? record.reason, 800));
+  } else {
+    const result = data.lifecycle?.result;
+    const selected = objects(result?.remember);
+    if (record.code === 'model_rules_saved') {
+      lines.push('  Rules saved (legacy event; previous states not recorded):');
+      for (const g of selected) lines.push('    Always allow · ' + atomLabel(g));
+      if (!selected.length) lines.push('    ' + safeText(record.preview, 1200));
+    } else if (selected.length) {
+      lines.push('  Proposed rules (save not confirmed):');
+      for (const g of selected) lines.push('    ' + atomLabel(g));
+    } else if (record.code === 'model_allow_once') lines.push('  Rule changes: none (allow once).');
+  }
+  if (record.detail.capture?.truncated)
+    lines.push('  Capture truncated: some audit evidence is unavailable.');
+  if (record.detail.capture?.redacted) lines.push('  Sensitive values were redacted.');
+  return lines.join('\n');
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const options = {},
     args = [...argv];
@@ -225,10 +343,8 @@ export async function main(argv = process.argv.slice(2)) {
     const flag = args.shift();
     if (flag === '--follow') follow = true;
     else if (flag === '--json') json = true;
-    else if (flag === '--details') {
-      details = true;
-      json = true;
-    } else if (flag === '--model-only') options.modelOnly = true;
+    else if (flag === '--details') details = true;
+    else if (flag === '--model-only') options.modelOnly = true;
     else if (['--limit', '--decision', '--session', '--policy'].includes(flag)) {
       const value = args.shift();
       if (!value || value.startsWith('--')) throw Error(`Missing value for ${flag}`);
@@ -238,11 +354,15 @@ export async function main(argv = process.argv.slice(2)) {
       process.stdout.write(
         'oc-approvals [--follow] [--decision ask|allow|deny] [--model-only]\n' +
           '             [--session ID] [--limit 1..200] [--json|--details] [--policy FILE]\n' +
+          '--details  Expand pretty output with analysis, grants, matched rules, and saved changes.\n' +
+          '--json     Emit JSON Lines including the stored detail payload.\n' +
           'Read local permission review records. V3 includes background states and native replies. It does not show command execution.\n',
       );
       return;
     } else throw Error(`Unknown option: ${flag}`);
   }
+  if (json && details) throw Error('Choose either --json or --details');
+  options.includePriorDetails = details;
   const root = await auditRoot(policy);
   let previous = new Map(),
     first = true,
@@ -262,15 +382,19 @@ export async function main(argv = process.argv.slice(2)) {
         current.set(key, occurrence);
         if (first || occurrence > (previous.get(key) ?? 0)) {
           let output = record;
-          if (details && record.details?.status === 'stored') {
+          const reference =
+            record.details?.status === 'stored' ? record.details : record.priorDetails;
+          if ((json || details) && reference?.status === 'stored') {
             try {
-              output = { ...record, detail: await readDetail(root, record.details) };
+              output = { ...record, detail: await readDetail(root, reference) };
             } catch (error) {
               output = { ...record, detailError: safeText(error.message) };
             }
           }
           process.stdout.write(
-            json ? JSON.stringify(output) + '\n' : formatRecord(record) + '\n\n',
+            json
+              ? JSON.stringify(output) + '\n'
+              : (details ? formatDetailedRecord(output) : formatRecord(record)) + '\n\n',
           );
         }
       }

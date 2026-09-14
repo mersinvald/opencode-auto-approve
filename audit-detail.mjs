@@ -1,3 +1,4 @@
+import { grantSnapshot } from './audit-grants.mjs';
 import { createHash } from 'node:crypto';
 import { mkdir, lstat, open, readdir, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -123,6 +124,7 @@ export function detailPayload({
   const { helpers, ...diagnosticFields } = diagnostics ?? {};
   return sanitizeAudit({
     schema: 'opencode.approval.detail',
+    grants: grantSnapshot(diagnostics?.static),
     capturedAt: new Date().toISOString(),
     source: {
       sessionID: event.sessionID,

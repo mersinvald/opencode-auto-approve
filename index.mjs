@@ -1,3 +1,4 @@
+import { ruleSnapshot, savedGrantSnapshot } from './audit-grants.mjs';
 import { Plugin } from '@opencode/plugin';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -23,7 +24,7 @@ import { createStructuredClassifier } from './structured-classifier.mjs';
 import { createRuleStore, legacyGrants, ruleDirectory } from './grant-store.mjs';
 import { ruleKey, selectedRulesHash, grantDescriptor } from './grant-rules.mjs';
 import { captureShellRuntime } from './shell-host.mjs';
-import { gate } from './grant-gate.mjs';
+import { gate, globalRules } from './grant-gate.mjs';
 import { reviewDynamic } from './grant-review.mjs';
 import { auditRecord, requestPreview, safeText } from './audit.mjs';
 import { writeAudit } from './audit-storage.mjs';
@@ -300,13 +301,17 @@ export function createApprovalPlugin({ generate: override } = {}) {
           if (['allow', 'native_reply', 'resolved'].includes(status))
             pendingRuntime.delete(job.meta.fingerprint);
           if (status === 'allow' && result.remember?.length) {
+            let beforeRules, savedState, saveError;
+            const changes = [];
             try {
-              await store.update(result.projectID, (state) => {
+              savedState = await store.update(result.projectID, (state) => {
                 if (selectedRulesHash(state.rules, result.remember) !== result.rememberHash)
                   throw Error('A selected rule changed before save');
+                beforeRules = [...state.rules];
                 for (const item of result.remember) {
+                  const previous = state.rules.find((r) => ruleKey(r) === ruleKey(item));
                   state.rules = state.rules.filter((r) => ruleKey(r) !== ruleKey(item));
-                  state.rules.push({
+                  const next = {
                     ...grantDescriptor(item),
                     ...(item.repositoryName ? { repositoryName: item.repositoryName } : {}),
                     mode: 'allow',
@@ -319,26 +324,56 @@ export function createApprovalPlugin({ generate: override } = {}) {
                       requestID: job.id,
                       reason: result.reason,
                     },
-                  });
+                  };
+                  state.rules.push(next);
+                  changes.push({ before: ruleSnapshot(previous), after: ruleSnapshot(next) });
                 }
               });
-              await writeAudit(config.auditRoot, {
-                ...row,
-                action: 'scoped_permission',
-                status: 'scoped_grant_created',
-                code: 'model_rules_saved',
-                preview: result.remember.map((g) => g.operation + ': ' + g.target).join(', '),
-                detailPayload: undefined,
-              });
             } catch (error) {
-              await writeAudit(config.auditRoot, {
-                ...row,
-                status: 'scope_not_saved',
-                code: 'rule_save_failed',
-                reason: error.message,
-                detailPayload: undefined,
-              });
+              saveError = error.message;
             }
+            let ruleUpdate = {
+              status: 'failed',
+              reason: saveError,
+              proposed: result.remember.map(ruleSnapshot),
+            };
+            if (savedState) {
+              ruleUpdate = { status: 'saved', changes };
+              // Audit enrichment cannot prevent or undo a successful rule save.
+              try {
+                const data = base?.detailPayload?.data;
+                const entries =
+                  data?.grants?.entries ?? data?.diagnostics?.static?.resolution?.entries;
+                if (!Array.isArray(entries)) throw Error('Grant states were not captured');
+                Object.assign(
+                  ruleUpdate,
+                  savedGrantSnapshot(
+                    entries.map((e) => e.grant),
+                    globalRules(config, data?.scope ?? {}),
+                    beforeRules,
+                    savedState.rules,
+                  ),
+                );
+              } catch (error) {
+                ruleUpdate.stateError = error.message;
+              }
+            }
+            const saveStatus = savedState ? 'scoped_grant_created' : 'scope_not_saved';
+            await writeAudit(config.auditRoot, {
+              ...row,
+              action: savedState ? 'scoped_permission' : row.action,
+              status: saveStatus,
+              code: savedState ? 'model_rules_saved' : 'rule_save_failed',
+              reason: savedState ? row.reason : saveError,
+              preview: savedState
+                ? result.remember.map((g) => g.operation + ': ' + g.target).join(', ')
+                : row.preview,
+              detailPayload: extendDetail(row.detailPayload ?? sanitizeAudit({}), {
+                ...row.detailPayload?.data?.lifecycle,
+                status: saveStatus,
+                ruleUpdate,
+              }),
+            });
           }
         },
       });
