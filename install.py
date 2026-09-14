@@ -19,7 +19,7 @@ def link_runtime(destination):
     if not target.exists():
         target.symlink_to(modules, target_is_directory=True)
 
-PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-review.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-storage.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'package.json']
+PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-review.mjs', 'review-presentation.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-storage.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'package.json']
 PYTHON_FILES = ['python-host.mjs', 'python-effects.mjs', 'python-invocation.mjs']
 PLUGIN_FILES += PYTHON_FILES
 

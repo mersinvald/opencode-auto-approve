@@ -71,6 +71,12 @@ Legacy command-specific Always ask rules cannot safely become atomic rules autom
 
 The model receives the current request, authority context, relevant atomic permissions, and candidate scopes. Unrelated grant history and repeated native permission records remain outside its prompt. Detailed analysis remains available in the private audit.
 
+The prompt identifies the pending grant IDs and any unknown effects. Already allowed effects appear in groups by operation, target type, and repository scope. Groups retain every exact target. They do not grant access to adjacent paths or other worktrees. Repeated rule records stay in the audit.
+
+Repeated parser diagnostics share one entry with their source locations and occurrence counts. Different working directories, branch outcomes, targets, and source files remain distinct. The full command, available helper sources, user messages, and delegation text remain in the request. Current user restrictions still apply to already allowed effects.
+
+This presentation does not change rule matching, candidate IDs, or checks for changed evidence. The audit records the original analysis, prompt size, pending IDs, and counts before and after grouping. This step adds no total prompt limit.
+
 ## Grant audit details
 
 The audit stores a compact grant snapshot before large command and helper evidence. It records parse coverage, unresolved commands, atomic grants, and the rules that matched at decision time.

@@ -90,6 +90,10 @@ class FullInstallTest(unittest.TestCase):
             self.assertEqual(len(config['plugins']), 2)
             self.assertEqual(policy_path.stat().st_mode & 0o777, 0o600)
             self.assertTrue((Path(first['plugin'])/'node_modules/@opencode/plugin').is_dir())
+            self.assertTrue((Path(first['plugin'])/'review-presentation.mjs').is_file())
+            subprocess.run(['node', '--input-type=module', '-e',
+                            "await import('./grant-review.mjs')"],
+                           cwd=first['plugin'], check=True, capture_output=True)
             self.assertTrue((root/'approval-state').is_relative_to(root))
 
     def test_missing_route_and_jsonc_fail_before_mutation(self):

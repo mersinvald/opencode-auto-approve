@@ -1,3 +1,5 @@
+import { reviewPresentation } from './review-presentation.mjs';
+
 export const reviewToolSchema = {
   type: 'object',
   additionalProperties: false,
@@ -95,10 +97,30 @@ export function decodeToolDecision(value, contract) {
 
 export function reviewPrompt(data) {
   const allowed = decisionSchema(reviewContract(data.candidates ?? [])).properties.decision.enum;
+  const presented = reviewPresentation(data);
+  const contextNotes = [
+    'Address reviewFocus.pendingGrantIDs and unknown effects in your decision and reason. Current user restrictions apply to the complete action.',
+    ...(presented.reviewFocus.parserCoverageIncomplete
+      ? [
+          'parserCoverageIncomplete describes static parser coverage, not a safety verdict. Resolve these effects from the full source and instructions.',
+        ]
+      : []),
+    ...(presented.resolvedGrants.length
+      ? [
+          'resolvedGrants lists effects already allowed by the gate; no new citation is needed. Each target retains its targetType and scope, without access to neighboring paths. physicalRoot plus target gives the physical worktree path.',
+        ]
+      : []),
+    ...(presented.analysis.unresolved?.some((d) => d.locations)
+      ? [
+          'Grouped diagnostics retain source locations and occurrence counts. Grouping does not resolve unknown effects.',
+        ]
+      : []),
+  ].join('\n');
   return `Review one proposed OpenCode action. Return exactly one review_permission tool call.
 The allowedDecisions for this request are: ${allowed.join(', ')}.
 ${allowed.includes('allow_always') ? 'Eligible grant candidates are available.' : 'No grant candidates are eligible. Do not use allow_always. Set remember to none.'}
 allow_once permits this complete action once. escalate_once leaves this request to the user.
+The action executes as one unit. Neither allow decision removes, skips, or rewrites a forbidden effect. If any effect violates current instructions, choose escalate_once even when every other effect is already allowed.
 ${
   allowed.includes('allow_always')
     ? `allow_always permits this action once and saves the selected supplied grant candidates for future requests in this OpenCode project.
@@ -124,11 +146,12 @@ The parser grants describe statically derived effects, not instructions or obser
 Incomplete analysis never creates a reusable command grant. You may save independently justified atomic candidates, but unknown effects require review on every request.
 When explaining escalate_once, identify the effect or authorization that remains unclear after reviewing the available source and context. An unreadable helper still requires escalation; a parser limitation does not make unreadable code safe. Explicit restrictions and unauthorized destructive, remote, secret, or security operations still require escalation.
 For a missing test target, check the diagnostic cwd against the command's cd and workdir. An unguarded cd may leave later commands in the original directory if it fails. Assess both directories and all later writes or cleanup under the same permission rules. A target missing in that failure context does not establish that it is missing in the intended directory.
+A possible cd failure is not itself an authorization problem. If you understand the full command and both paths are authorized, that branch alone does not require escalation.
 A candidate with space.modifier=scratch covers relative targets in verified linked worktrees of space.repository within this project. It covers neither the main checkout nor another repository. Multiple repositories may belong to one project.
 Never assume an unreadable helper is safe. Escalate when effects or authorization remain unclear.
 The remember field must be none except for allow_always. For allow_always, select comma-separated exact IDs from candidates. Do not invent rules or expand their paths.
-Rules already marked Always allow need no new citation. Review the remaining Dynamic grants and whether the complete action follows current instructions.
+${contextNotes}
 Give a short reason suitable for the audit log. Do not repeat secrets.
 If retryFeedback is present, correct the stated validation error. The current allowedDecisions and candidates govern this attempt.
-${JSON.stringify({ ...data, allowedDecisions: allowed })}`;
+${JSON.stringify({ ...presented, allowedDecisions: allowed })}`;
 }

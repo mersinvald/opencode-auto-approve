@@ -8,6 +8,7 @@ import {
 import { scriptEvidence, bounded } from './review-context.mjs';
 import { digest, redact } from './policy.mjs';
 import { selectedRulesHash, grantDescriptor } from './grant-rules.mjs';
+import { reviewPresentation } from './review-presentation.mjs';
 
 export async function reviewDynamic(
   prepared,
@@ -80,11 +81,21 @@ export async function reviewDynamic(
         stage = 'model';
         const contract = reviewContract(checked.candidates),
           prompt = reviewPrompt(data);
+        const presented = reviewPresentation(data);
         diagnostics.prompt = {
           characters: prompt.length,
           omittedAstCharacters: JSON.stringify(checked.analysis.syntax ?? '').length,
           eligibleCandidates: contract.candidateIDs.length,
           retryFeedback,
+          presentation: {
+            version: 1,
+            ...presented.reviewFocus,
+            resolvedGroups: presented.resolvedGrants.length,
+            unresolvedBefore: data.analysis.unresolved?.length ?? 0,
+            unresolvedGroups: presented.analysis.unresolved?.length ?? 0,
+            originalDataCharacters: JSON.stringify(data).length,
+            presentedDataCharacters: JSON.stringify(presented).length,
+          },
         };
         const response = await generate({ model: config.model, prompt, contract }, signal);
         diagnostics.model = response;
