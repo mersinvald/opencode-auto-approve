@@ -35,6 +35,16 @@ Shell examples require the parser and verified executable identities. Unsupporte
 
 A path rule does not cover a similarly named sibling directory. A grant for `/work/app` does not cover `/work/app-backup`.
 
+## Temporary test output
+
+Call `approval_scratch` from each worker session. Use its returned directory for pytest `--basetemp`, caches, and disposable test output.
+
+Pytest can delete an existing basetemp directory. That operation needs `files.delete` as well as the test execution permission.
+
+The worker scratch already has this permission. Ancestor scratch directories have automatic read access only. Reusing its path can require another model decision for each new test directory.
+
+Keep shared deliverables at their assigned paths. Other sessions can read these artifacts without sharing its cleanup permission.
+
 ## Sed reads and edits
 
 The shell parser converts supported `sed` commands into the same file grants used by native reads and edits. It does not create a separate permission for each expression.

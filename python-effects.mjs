@@ -5,7 +5,19 @@ import path from 'node:path';
 // existing canonical-path + grant gate before they can authorize anything.
 const UNKNOWN = Symbol('unknown');
 const tagged = (kind, value) => ({ kind, value });
-const builtin = new Set(['open', 'print', 'str', 'bytes', 'len', 'bool', 'int', 'repr', 'range']);
+const builtin = new Set([
+  'open',
+  'print',
+  'str',
+  'bytes',
+  'len',
+  'bool',
+  'int',
+  'repr',
+  'range',
+  'sorted',
+  'list',
+]);
 const isUnknown = (v) => v === UNKNOWN;
 const hasParent = (value) => typeof value === 'string' && value.split('/').includes('..');
 const string = (v) => (typeof v === 'string' ? v : v?.kind === 'path' ? v.value : null);
@@ -39,6 +51,8 @@ const knownReferences = new Set([
   'subprocess.check_call',
   'subprocess.check_output',
   'io.open',
+  'hashlib.sha256',
+  'json.loads',
 ]);
 // Path objects keep their lexical path. They are resolved against cwd only
 // when used, including after os.chdir(). Parent traversal stays unresolved.
@@ -65,7 +79,10 @@ const textOptions = (kwargs) =>
     ].includes(kwargs.errors)) &&
   (kwargs.newline == null || ['', '\n', '\r', '\r\n'].includes(kwargs.newline));
 
-export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv = [] } = {}) {
+export function pythonEffects(
+  tree,
+  { cwd, source = '<inline>', scriptPath, argv = [], globResults = {} } = {},
+) {
   if (!path.isAbsolute(cwd ?? '') || tree?._type !== 'Module') throw Error('python_effect_input');
   const effects = [],
     unresolved = [];
@@ -243,6 +260,27 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
     if (fn?.kind === 'method') {
       const { receiver, name } = fn.value;
       if (receiver?.kind === 'path') {
+        if (name === 'glob' && args.length === 1 && !Object.keys(kwargs).length) {
+          const pattern = args[0];
+          if (
+            typeof pattern !== 'string' ||
+            !pattern ||
+            pattern.length > 128 ||
+            /[\/\\\[\]\x00-\x1f]/.test(pattern) ||
+            pattern.includes('**') ||
+            ['.', '..'].includes(pattern)
+          )
+            return unknown(node, 'python_glob_pattern');
+          const target = filename(node, receiver);
+          if (target === UNKNOWN) return UNKNOWN;
+          const key = JSON.stringify([target, pattern]);
+          effect(node, { kind: 'glob', target, pattern, key });
+          if (!Object.hasOwn(globResults, key)) return unknown(node, 'python_glob_pending');
+          return tagged(
+            'sequence',
+            globResults[key].map((p) => tagged('path', p)),
+          );
+        }
         if (
           ['read_text', 'read_bytes'].includes(name) &&
           !args.length &&
@@ -333,10 +371,136 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
           return unknown(node, 'python_file_argument_protocol');
         return tagged('data', ['write', 'seek', 'tell'].includes(name) ? 'int' : 'str');
       }
+      if (
+        receiver?.kind === 'hash' &&
+        ['hexdigest', 'digest'].includes(name) &&
+        !args.length &&
+        !Object.keys(kwargs).length
+      )
+        return tagged('data', name === 'digest' ? 'bytes' : 'str');
+      const textReceiver =
+        typeof receiver === 'string' || (receiver?.kind === 'data' && receiver.value === 'str');
+      if (textReceiver) {
+        if (
+          name === 'encode' &&
+          args.length <= 1 &&
+          keysOnly(kwargs, ['encoding', 'errors']) &&
+          textOptions({ ...kwargs, ...(args.length ? { encoding: args[0] } : {}) })
+        )
+          return tagged('data', 'bytes');
+        if (name === 'splitlines' && !args.length && !Object.keys(kwargs).length)
+          return typeof receiver === 'string'
+            ? tagged(
+                'sequence',
+                receiver
+                  ? receiver
+                      .replace(/(?:\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029])$/, '')
+                      .split(/\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/)
+                  : [],
+              )
+            : tagged('data', 'strings');
+        if (name === 'join' && args.length === 1 && !Object.keys(kwargs).length) {
+          const values = args[0];
+          if (values?.kind === 'sequence' && values.value.every((v) => typeof v === 'string')) {
+            if (typeof receiver !== 'string') return tagged('data', 'str');
+            const size =
+              values.value.reduce((n, v) => n + v.length, 0) +
+              receiver.length * Math.max(0, values.value.length - 1);
+            return size <= maxString
+              ? values.value.join(receiver)
+              : unknown(node, 'python_value_limit');
+          }
+          if (
+            (values?.kind === 'data' && values.value === 'strings') ||
+            (values?.kind === 'sequence' &&
+              values.value.every(
+                (v) => typeof v === 'string' || (v?.kind === 'data' && v.value === 'str'),
+              ))
+          )
+            return tagged('data', 'str');
+        }
+      }
+      if (receiver?.kind === 'mapping' && !args.length && !Object.keys(kwargs).length) {
+        if (name === 'keys') return tagged('sequence', [...receiver.value.keys()]);
+        if (name === 'values') return tagged('sequence', [...receiver.value.values()]);
+        if (name === 'items')
+          return tagged(
+            'sequence',
+            [...receiver.value].map((v) => tagged('sequence', v)),
+          );
+      }
       return unknown(node, 'python_unknown_method:' + name);
     }
     const name = fn?.kind === 'reference' ? fn.value : null;
     if (!name) return unknown(node, 'python_unknown_callable');
+    if (
+      name === 'hashlib.sha256' &&
+      args.length === 1 &&
+      !Object.keys(kwargs).length &&
+      args[0]?.kind === 'data' &&
+      args[0].value === 'bytes'
+    )
+      return tagged('hash', 'sha256');
+    if (
+      name === 'json.loads' &&
+      args.length === 1 &&
+      !Object.keys(kwargs).length &&
+      (typeof args[0] === 'string' ||
+        (args[0]?.kind === 'data' && ['str', 'bytes'].includes(args[0].value)))
+    )
+      return tagged('data', 'json');
+    if (
+      ['list', 'sorted'].includes(name) &&
+      args.length === 1 &&
+      keysOnly(kwargs, name === 'sorted' ? ['reverse'] : []) &&
+      (kwargs.reverse === undefined || typeof kwargs.reverse === 'boolean')
+    ) {
+      const value = args[0];
+      if (value?.kind === 'data' && value.value === 'strings') return value;
+      if (value?.kind === 'sequence') {
+        if (name === 'list') return tagged('sequence', [...value.value]);
+        const values = value.value;
+        if (
+          values.every((v) => typeof v === 'string' || (v?.kind === 'data' && v.value === 'str')) &&
+          values.some((v) => typeof v !== 'string')
+        )
+          return tagged('data', 'strings');
+        const kind = (v) =>
+          typeof v === 'string'
+            ? 'str'
+            : typeof v === 'bigint'
+              ? 'int'
+              : v?.kind === 'path'
+                ? 'path'
+                : null;
+        const category = values.length ? kind(values[0]) : 'str';
+        if (category && values.every((v) => kind(v) === category)) {
+          const cmp = (a, b) => {
+            if (typeof a === 'bigint') return a < b ? -1 : a > b ? 1 : 0;
+            const aa = [...a].map((c) => c.codePointAt(0)),
+              bb = [...b].map((c) => c.codePointAt(0));
+            for (let i = 0; i < Math.min(aa.length, bb.length); i++)
+              if (aa[i] !== bb[i]) return aa[i] - bb[i];
+            return aa.length - bb.length;
+          };
+          const compare = (a, b) => {
+            if (category !== 'path') return cmp(a, b);
+            const aa = a.value.split('/'),
+              bb = b.value.split('/');
+            for (let i = 0; i < Math.min(aa.length, bb.length); i++) {
+              const c = cmp(aa[i], bb[i]);
+              if (c) return c;
+            }
+            return aa.length - bb.length;
+          };
+          return tagged(
+            'sequence',
+            [...values].sort((a, b) => (kwargs.reverse ? -1 : 1) * compare(a, b)),
+          );
+        }
+      }
+      return unknown(node, 'python_sort_or_iter_protocol');
+    }
     if (
       name === 'range' &&
       !Object.keys(kwargs).length &&
@@ -359,7 +523,9 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
       if (typeof value === 'string') return BigInt([...value].length);
       if (value?.kind === 'sequence') return BigInt(value.value.length);
       if (value?.kind === 'mapping') return BigInt(value.value.size);
-      return value?.kind === 'data' ? UNKNOWN : unknown(node, 'python_len_protocol');
+      return value?.kind === 'data' && ['str', 'bytes', 'strings', 'json'].includes(value.value)
+        ? tagged('data', 'int')
+        : unknown(node, 'python_len_protocol');
     }
     if (
       ['open', 'io.open'].includes(name) &&
@@ -466,14 +632,19 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
         : unknown(node, 'python_str_protocol');
     }
     if (name === 'print' && keysOnly(kwargs, ['sep', 'end', 'file', 'flush'])) {
+      const printable = (v, depth = 0) =>
+        depth < 16 &&
+        v !== UNKNOWN &&
+        (v === null ||
+          ['string', 'bigint', 'boolean'].includes(typeof v) ||
+          ['data', 'path'].includes(v?.kind) ||
+          (v?.kind === 'sequence' && v.value.every((x) => printable(x, depth + 1))) ||
+          (v?.kind === 'mapping' &&
+            [...v.value].every(([k, x]) => printable(k, depth + 1) && printable(x, depth + 1))));
       if (kwargs.file != null && kwargs.file?.kind !== 'file')
         return unknown(node, 'python_print_destination');
       if (
-        args.some(
-          (v) =>
-            v === UNKNOWN ||
-            (typeof v === 'object' && v !== null && !['data', 'path'].includes(v.kind)),
-        ) ||
+        args.some((v) => !printable(v)) ||
         ['sep', 'end'].some((k) => kwargs[k] != null && typeof kwargs[k] !== 'string') ||
         (kwargs.flush !== undefined && typeof kwargs.flush !== 'boolean')
       )
@@ -540,6 +711,30 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
       case 'Tuple':
         if (node.elts.length > maxValues) return unknown(node, 'python_value_limit');
         return tagged('sequence', node.elts.map(evaluate));
+      case 'ListComp': {
+        if (
+          node.generators.length !== 1 ||
+          node.generators[0].is_async ||
+          node.generators[0].ifs.length
+        )
+          return unknown(node, 'python_comprehension_shape');
+        const g = node.generators[0],
+          values = evaluate(g.iter);
+        if (values?.kind !== 'sequence' || values.value.length > 32)
+          return unknown(node, 'python_dynamic_comprehension');
+        const parent = env,
+          result = [];
+        env = new Map(parent);
+        try {
+          for (const value of values.value) {
+            bind(g.target, value);
+            result.push(evaluate(node.elt));
+          }
+        } finally {
+          env = parent;
+        }
+        return tagged('sequence', result);
+      }
       case 'Dict':
         if (node.keys.length > maxValues) return unknown(node, 'python_value_limit');
         if (node.keys.some((key) => key === null)) unknown(node, 'python_mapping_unpack');
@@ -699,8 +894,33 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
         return out;
       }
       case 'Subscript': {
-        const value = evaluate(node.value),
-          index = evaluate(node.slice);
+        const value = evaluate(node.value);
+        if (node.slice._type === 'Slice') {
+          const bounds = ['lower', 'upper', 'step'].map((k) =>
+            node.slice[k] ? evaluate(node.slice[k]) : null,
+          );
+          if (
+            bounds.some(
+              (v) => v !== null && (typeof v !== 'bigint' || v > 65536n || v < -65536n),
+            ) ||
+            (bounds[2] !== null && bounds[2] !== 1n)
+          )
+            return unknown(node, 'python_slice_protocol');
+          if (value?.kind === 'data' && ['str', 'bytes'].includes(value.value)) return value;
+          const seq =
+            typeof value === 'string'
+              ? [...value]
+              : value?.kind === 'sequence'
+                ? value.value
+                : null;
+          if (!seq) return unknown(node, 'python_slice_protocol');
+          const sliced = seq.slice(
+            bounds[0] === null ? 0 : Number(bounds[0]),
+            bounds[1] === null ? seq.length : Number(bounds[1]),
+          );
+          return typeof value === 'string' ? sliced.join('') : tagged('sequence', sliced);
+        }
+        const index = evaluate(node.slice);
         if (
           value?.kind === 'sequence' &&
           typeof index === 'bigint' &&
@@ -842,8 +1062,40 @@ export function pythonEffects(tree, { cwd, source = '<inline>', scriptPath, argv
         };
       unknown(node, 'python_divergent_control_flow');
       return null;
+    } else if (node._type === 'While') {
+      for (let pass = 0; pass < 2; pass++) {
+        const condition = truth(evaluate(node.test), node);
+        if (condition === false) break;
+        const result = fork(
+          node,
+          () => block(node.body),
+          () => null,
+        );
+        if (result === UNKNOWN || (result.yes && !['break', 'continue'].includes(result.yes.kind)))
+          unknown(node, 'python_loop_control');
+      }
+      return block(node.orelse);
     } else if (node._type === 'For') {
       const items = evaluate(node.iter);
+      if (items?.kind === 'data' && items.value === 'strings') {
+        // Merge zero and repeated iterations. Values that vary become unknown.
+        for (let pass = 0; pass < 2; pass++) {
+          const result = fork(
+            node,
+            () => {
+              bind(node.target, tagged('data', 'str'));
+              return block(node.body);
+            },
+            () => null,
+          );
+          if (
+            result === UNKNOWN ||
+            (result.yes && !['break', 'continue'].includes(result.yes.kind))
+          )
+            unknown(node, 'python_loop_control');
+        }
+        return block(node.orelse);
+      }
       if (items?.kind !== 'sequence' || items.value.length > 32) {
         unknown(node, 'python_dynamic_loop');
         return;

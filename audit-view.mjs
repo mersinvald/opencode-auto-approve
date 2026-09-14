@@ -1,3 +1,4 @@
+import { vacuumAudit, parseAuditSize } from './audit-maintenance.mjs';
 import { terminalLayout } from './audit-terminal.mjs';
 import { grantSnapshot } from './audit-grants.mjs';
 import { modeLabels } from './grant-rules.mjs';
@@ -27,10 +28,14 @@ export async function auditRoot(
 }
 
 export function normalizeRecord(record) {
+  const maintenance =
+    record?.version === 3 &&
+    record.kind === 'maintenance' &&
+    record.code === 'audit_storage_warning';
   if (
     ![1, 2, 3].includes(record?.version) ||
     typeof record.time !== 'string' ||
-    !['allow', 'ask', 'deny'].includes(record.proposed)
+    (!maintenance && !['allow', 'ask', 'deny'].includes(record.proposed))
   )
     return null;
   const legacy = record.version === 1;
@@ -41,6 +46,21 @@ export function normalizeRecord(record) {
   };
   return {
     version: record.version,
+    ...(maintenance
+      ? {
+          kind: 'maintenance',
+          storage: {
+            bytes: Number(record.storage?.bytes),
+            oldestDay: safeText(record.storage?.oldestDay, 10),
+            oldestAgeDays: Number(record.storage?.oldestAgeDays),
+            thresholds: {
+              ageDays: Number(record.storage?.thresholds?.ageDays),
+              bytes: Number(record.storage?.thresholds?.bytes),
+            },
+            triggered: ['age', 'size'].filter((x) => record.storage?.triggered?.includes(x)),
+          },
+        }
+      : {}),
     time: safeText(record.time, 40),
     sessionID: safeText(record.sessionID, 160),
     sourceID: safeText(record.sourceID, 160),
@@ -107,8 +127,7 @@ export async function readAudit(
     names = (await readdir(root))
       .filter((n) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(n))
       .sort()
-      .reverse()
-      .slice(0, 14);
+      .reverse();
   } catch (error) {
     if (error.code === 'ENOENT') return { records: [], skipped: 0, limited: false };
     throw error;
@@ -203,6 +222,12 @@ export async function readAudit(
 }
 
 export function formatRecord(record, options) {
+  if (record.kind === 'maintenance') {
+    const ui = terminalLayout(options);
+    ui.title('WARNING · audit storage', new Date(record.time).toLocaleString(), 'amber');
+    ui.line(record.reason);
+    return ui.result();
+  }
   const date = new Date(record.time);
   const time = Number.isNaN(date.valueOf()) ? record.time : date.toLocaleString();
   const label =
@@ -252,6 +277,7 @@ const eventTone = (record) =>
 const grantTone = (mode) => ({ allow: 'green', ask: 'amber', dynamic: 'cyan' })[mode];
 
 export function formatDetailedRecord(record, options) {
+  if (record.kind === 'maintenance') return formatRecord(record, options);
   const ui = terminalLayout(options),
     data = record.detail?.data;
   const snapshot = data?.grants ?? grantSnapshot(data?.diagnostics?.static);
@@ -515,17 +541,33 @@ export async function main(argv = process.argv.slice(2)) {
     json = false,
     details = false,
     color = 'auto',
-    policy;
+    policy,
+    vacuum = false;
+  const cleanup = {};
   while (args.length) {
     const flag = args.shift();
-    if (flag === '--follow') follow = true;
+    if (flag === 'vacuum' && !vacuum) vacuum = true;
+    else if (flag === '--dry-run') cleanup.dryRun = true;
+    else if (flag === '--follow') follow = true;
     else if (flag === '--json') json = true;
     else if (flag === '--details') details = true;
     else if (flag === '--model-only') options.modelOnly = true;
-    else if (['--limit', '--decision', '--session', '--policy', '--color'].includes(flag)) {
+    else if (
+      [
+        '--limit',
+        '--decision',
+        '--session',
+        '--policy',
+        '--color',
+        '--keep-days',
+        '--max-size',
+      ].includes(flag)
+    ) {
       const value = args.shift();
       if (!value || value.startsWith('--')) throw Error(`Missing value for ${flag}`);
-      if (flag === '--color') {
+      if (flag === '--keep-days') cleanup.keepDays = Number(value);
+      else if (flag === '--max-size') cleanup.maxBytes = parseAuditSize(value);
+      else if (flag === '--color') {
         if (!['auto', 'always', 'never'].includes(value))
           throw Error('Color must be auto, always, or never');
         color = value;
@@ -535,6 +577,9 @@ export async function main(argv = process.argv.slice(2)) {
       process.stdout.write(
         'oc-approvals [--follow] [--decision ask|allow|deny] [--model-only]\n' +
           '             [--session ID] [--limit 1..200] [--json|--details] [--color auto|always|never] [--policy FILE]\n' +
+          'oc-approvals vacuum [--dry-run] [--keep-days 14] [--max-size 1GiB] [--json] [--policy FILE]\n' +
+          'vacuum     Remove old UTC audit days. Current-day data and referenced details remain.\n' +
+          '--max-size Also remove oldest prior days toward this size, even within --keep-days.\n' +
           '--details  Expand pretty output with analysis, grants, matched rules, and saved changes.\n' +
           '--json     Emit JSON Lines including the stored detail payload.\n' +
           '--color    Default: auto (TTY only; respects NO_COLOR). Use always with less -R.\n' +
@@ -544,8 +589,36 @@ export async function main(argv = process.argv.slice(2)) {
     } else throw Error(`Unknown option: ${flag}`);
   }
   if (json && details) throw Error('Choose either --json or --details');
-  options.includePriorDetails = details;
   const root = await auditRoot(policy);
+  if (vacuum) {
+    if (follow || details || Object.keys(options).length)
+      throw Error('Vacuum does not accept view filters, --follow, or --details');
+    const result = await vacuumAudit(root, cleanup);
+    if (json) process.stdout.write(JSON.stringify(result) + '\n');
+    else {
+      const ui = terminalLayout({ color });
+      ui.title(result.dryRun ? 'VACUUM PREVIEW' : 'VACUUM COMPLETE', '', 'cyan');
+      ui.line(
+        `${result.dryRun ? 'Would remove' : 'Removed'} ${result.files.length} audit files · ${(result.bytesReclaimed / 1024 ** 2).toFixed(2)} MiB`,
+      );
+      ui.line(
+        `Storage: ${(result.bytesBefore / 1024 ** 3).toFixed(2)} → ${(result.bytesAfter / 1024 ** 3).toFixed(2)} GiB`,
+      );
+      if (result.days.length) ui.line('UTC days: ' + result.days.join(', '));
+      if (result.protectedFiles.length)
+        ui.line(`${result.protectedFiles.length} detail files retained for newer audit records.`);
+      if (!result.targetReached)
+        ui.line('Size target not reached: current-day data and referenced details are protected.', {
+          tone: 'amber',
+        });
+      if (result.dryRun)
+        ui.line('No files deleted. Run the same command without --dry-run to apply.');
+      process.stdout.write(ui.result() + '\n');
+    }
+    return;
+  }
+  if (Object.keys(cleanup).length) throw Error('Cleanup options require the vacuum command');
+  options.includePriorDetails = details;
   let previous = new Map(),
     first = true,
     stopped = false;

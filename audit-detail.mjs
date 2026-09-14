@@ -1,16 +1,13 @@
 import { grantSnapshot } from './audit-grants.mjs';
 import { createHash } from 'node:crypto';
-import { mkdir, lstat, open, readdir, unlink } from 'node:fs/promises';
+import { mkdir, lstat, open, unlink } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import { digest, redact } from './policy.mjs';
 
 export const DETAIL_VERSION = 1;
-export const DETAIL_MAX_BYTES = 512 * 1024;
-const dayBudget = 128 * 1024 * 1024;
 const secretKey =
   /(?:password|passwd|passphrase|secret|token|api[_-]?key|access[_-]?key|authorization|cookie|credentials?|private[_-]?key)$/i;
-const budgets = new Map();
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 
 export function scrubAuditText(input) {
@@ -43,59 +40,33 @@ export function scrubAuditText(input) {
   );
 }
 
-export function sanitizeAudit(value, { maxChars = 180000, maxString = 65536 } = {}) {
-  const redactions = [],
-    omissions = [];
-  let remaining = maxChars,
-    nodes = 0;
-  const walk = (item, location, depth) => {
-    if (++nodes > 16000 || depth > 40 || remaining <= 0) {
-      if (omissions.length < 100) omissions.push({ path: location, reason: 'record_budget' });
-      return '[OMITTED: audit budget]';
-    }
+export function sanitizeAudit(value) {
+  const redactions = [];
+  const walk = (item, location) => {
     if (typeof item === 'string') {
       const clean = scrubAuditText(item);
-      if (clean !== item && redactions.length < 100) redactions.push(location);
-      const limit = Math.min(maxString, remaining),
-        text = clean.slice(0, limit);
-      remaining -= text.length;
-      if (text.length !== clean.length && omissions.length < 100)
-        omissions.push({
-          path: location,
-          reason: 'text_budget',
-          originalChars: item.length,
-          sanitizedChars: clean.length,
-          storedChars: text.length,
-        });
-      return text;
+      if (clean !== item) redactions.push(location);
+      return clean;
     }
-    if (Array.isArray(item)) {
-      if (item.length > 256 && omissions.length < 100)
-        omissions.push({ path: location, reason: 'array_budget', originalItems: item.length });
-      return item.slice(0, 256).map((v, i) => walk(v, location + '[' + i + ']', depth + 1));
-    }
+    if (Array.isArray(item)) return item.map((v, i) => walk(v, location + '[' + i + ']'));
     if (item && typeof item === 'object') {
-      const entries = Object.entries(item);
-      if (entries.length > 256 && omissions.length < 100)
-        omissions.push({ path: location, reason: 'object_budget' });
       return Object.fromEntries(
-        entries.slice(0, 256).map(([key, child]) => {
-          remaining -= key.length;
+        Object.entries(item).map(([key, child]) => {
           const p = location + '.' + key;
           // "authorization" is also a public decision-schema enum.
           const decisionEnum =
             key === 'authorization' && ['task', 'explicit', 'none'].includes(child);
           if (secretKey.test(key) && !decisionEnum) {
-            if (redactions.length < 100) redactions.push(p);
+            redactions.push(p);
             return [key, '[REDACTED]'];
           }
-          return [scrubAuditText(key), walk(child, p, depth + 1)];
+          return [scrubAuditText(key), walk(child, p)];
         }),
       );
     }
     return typeof item === 'number' && !Number.isFinite(item) ? null : item;
   };
-  const data = walk(value, '$', 0);
+  const data = walk(value, '$');
   return {
     version: DETAIL_VERSION,
     data,
@@ -103,8 +74,8 @@ export function sanitizeAudit(value, { maxChars = 180000, maxString = 65536 } = 
       hashFormat: 'sha256-json',
       redacted: redactions.length > 0,
       redactions,
-      truncated: omissions.length > 0,
-      omissions,
+      truncated: false,
+      omissions: [],
       originalHash: digest(value),
       storedHash: digest(data),
     },
@@ -168,7 +139,7 @@ export function detailPayload({
 
 export function extendDetail(payload, lifecycle) {
   if (!payload) return undefined;
-  // Keep the final native outcome even if a large source snapshot exhausts the budget.
+  // Keep the final native outcome and the earlier capture provenance.
   const { lifecycle: previousLifecycle, ...data } = payload.data;
   const result = sanitizeAudit({ lifecycle, ...data });
   result.capture.redacted ||= payload.capture?.redacted ?? false;
@@ -185,19 +156,6 @@ async function privateDirectory(directory) {
   if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid() || st.mode & 0o077)
     throw Error('unsafe_detail_directory');
 }
-async function usage(directory) {
-  const cached = budgets.get(directory);
-  if (cached && Date.now() - cached.time < 60000) return cached;
-  let bytes = 0;
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    if (/^[a-f0-9]{64}\.json$/.test(entry.name) && entry.isFile())
-      bytes += (await lstat(path.join(directory, entry.name))).size;
-  }
-  const value = { time: Date.now(), bytes };
-  budgets.set(directory, value);
-  return value;
-}
-
 // Optional verbose capture must not create a new permission failure mode.
 // The compact audit append remains mandatory for automatic approval.
 export async function writeDetail(root, payload, day) {
@@ -207,23 +165,10 @@ export async function writeDetail(root, payload, day) {
       directory = path.join(base, day);
     await privateDirectory(base);
     await privateDirectory(directory);
-    let serialized = JSON.stringify(payload, null, 2) + '\n';
-    if (Buffer.byteLength(serialized) > DETAIL_MAX_BYTES) {
-      const previous = payload.capture;
-      payload = sanitizeAudit(payload.data, { maxChars: 24000, maxString: 8000 });
-      payload.capture.redacted ||= previous?.redacted ?? false;
-      payload.capture.previous = previous;
-      payload.capture.truncated = true;
-      payload.capture.omissions.push({ path: '$', reason: 'serialized_byte_budget' });
-      serialized = JSON.stringify(payload, null, 2) + '\n';
-    }
-    if (Buffer.byteLength(serialized) > DETAIL_MAX_BYTES) throw Error('detail_size_limit');
+    const serialized = JSON.stringify(payload, null, 2) + '\n';
     const sha256 = hash(serialized),
       name = sha256 + '.json',
       filePath = path.join(directory, name);
-    const current = await usage(directory);
-    if (current.bytes + Buffer.byteLength(serialized) > dayBudget)
-      throw Error('detail_daily_budget');
     let file;
     try {
       file = await open(
@@ -246,7 +191,6 @@ export async function writeDetail(root, payload, day) {
       } finally {
         await file.close();
       }
-      current.bytes += Buffer.byteLength(serialized);
     }
     return {
       status: 'stored',
@@ -285,43 +229,12 @@ export async function readDetail(root, reference) {
   );
   try {
     const st = await file.stat();
-    if (
-      !st.isFile() ||
-      st.uid !== process.getuid() ||
-      st.mode & 0o077 ||
-      st.size > DETAIL_MAX_BYTES
-    )
+    if (!st.isFile() || st.uid !== process.getuid() || st.mode & 0o077)
       throw Error('Unsafe audit detail file');
-    const buffer = Buffer.alloc(DETAIL_MAX_BYTES + 1),
-      { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-    const text = buffer.subarray(0, bytesRead);
+    const text = await file.readFile();
     if (hash(text) !== reference.sha256) throw Error('Audit detail hash mismatch');
     return JSON.parse(text.toString('utf8'));
   } finally {
     await file.close();
-  }
-}
-
-export async function pruneDetails(root, cutoff) {
-  const base = path.join(root, 'details');
-  try {
-    const st = await lstat(base);
-    if (!st.isDirectory() || st.isSymbolicLink()) return;
-    for (const day of await readdir(base, { withFileTypes: true })) {
-      if (
-        !day.isDirectory() ||
-        !/^\d{4}-\d{2}-\d{2}$/.test(day.name) ||
-        Date.parse(day.name) >= cutoff
-      )
-        continue;
-      const directory = path.join(base, day.name);
-      for (const entry of await readdir(directory, { withFileTypes: true })) {
-        if (entry.isFile() && /^[a-f0-9]{64}\.json$/.test(entry.name))
-          await unlink(path.join(directory, entry.name));
-      }
-      budgets.delete(directory);
-    }
-  } catch {
-    /* Retention failure cannot change a permission decision. */
   }
 }

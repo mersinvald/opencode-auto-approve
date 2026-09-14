@@ -19,7 +19,7 @@ def link_runtime(destination):
     if not target.exists():
         target.symlink_to(modules, target_is_directory=True)
 
-PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-review.mjs', 'review-presentation.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-storage.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'package.json']
+PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-lines.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-review.mjs', 'review-presentation.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-storage.mjs', 'audit-maintenance.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'package.json']
 PYTHON_FILES = ['python-host.mjs', 'python-effects.mjs', 'python-invocation.mjs']
 PLUGIN_FILES += PYTHON_FILES
 
@@ -68,7 +68,7 @@ def install_audit_viewer(root, bin_dir=None):
         shutil.copy2(launcher, backup/'oc-approvals')
     destination.mkdir(parents=True, exist_ok=True)
     link_runtime(destination)
-    for name in ['audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'policy.mjs', 'shell-context.mjs', 'audit-storage.mjs', 'repository-scope.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'grant-tree-tui.mjs', 'approval-notifications.mjs']:
+    for name in ['audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'policy.mjs', 'shell-context.mjs', 'audit-storage.mjs', 'audit-maintenance.mjs', 'repository-scope.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-lines.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'grant-tree-tui.mjs', 'approval-notifications.mjs']:
         shutil.copy2(SOURCE/name, destination/name)
     shutil.copy2(SOURCE/'audit-tui.mjs', destination/'tui.mjs')
     copy_python(destination)

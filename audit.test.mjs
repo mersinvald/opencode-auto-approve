@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, symlink } from 'node:fs/promises';
+import { mkdtemp, writeFile, symlink, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { safeText, requestPreview } from './audit.mjs';
@@ -160,4 +160,26 @@ test('notification scans filter after latest state and can find active requests 
   );
   assert.equal((await readAudit(root, { requestIDs: ['per_done'] })).records[0].applied, 'allow');
   await assert.rejects(readAudit(root, { maxFileBytes: 100 * 1024 * 1024 }));
+});
+
+test('viewer can find a session older than the latest fourteen daily logs', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'approval-view-history-'));
+  try {
+    for (let i = 1; i <= 21; i++) {
+      const day = '2000-01-' + String(i).padStart(2, '0');
+      await writeFile(
+        path.join(root, day + '.jsonl'),
+        JSON.stringify({
+          ...entry,
+          time: day + 'T00:00:00Z',
+          sessionID: 'ses_day_' + i,
+        }) + '\n',
+      );
+    }
+    const result = await readAudit(root, { session: 'ses_day_1' });
+    assert.equal(result.records.length, 1);
+    assert.equal(result.records[0].time, '2000-01-01T00:00:00Z');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

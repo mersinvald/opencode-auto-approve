@@ -11,6 +11,7 @@ def main():
     external = base/'external'; external.mkdir(); (external/'file').write_text('External fixture read.\n')
     (repo/'file').write_text('hello\nworld\n')
     (repo/'sed-edit').write_text('before\n')
+    (repo/'files.txt').write_text('file\n')
     (repo/'tests').mkdir()
     for name in ['test_phase1_one.py','test_phase1_two.py']:(repo/'tests'/name).write_text('# Fixture selection only.\n')
     # Synthetic runner: test the native permission path and shell glob expansion,
@@ -32,7 +33,7 @@ def main():
       'grantRules': [{'operation':'files.read','target':str(external/'file'),'targetType':'file','mode':'allow'},
                      {'operation':'tests.run','target':str(repo/'tests'),'targetType':'directory','mode':'allow'}],
       'staticShell': {'enabled': True, 'probeReadConditions': True, 'parser': {'path': str(parser), 'sha256': hashlib.sha256(parser.read_bytes()).hexdigest()}}}
-    policy['grantRules'] += [{'operation':'files.write','target':str(repo/name),'targetType':'file','mode':'allow'} for name in ['sed-edit','sed-edit.bak']]
+    policy['grantRules'] += [{'operation':'files.write','target':str(repo/name),'targetType':'file','mode':'allow'} for name in ['sed-edit','sed-edit.bak','generated-list']]
     # Linux Python aliases resolve to a versioned binary. Pin this inspected fixture interpreter.
     python = Path('/usr/bin/python3').resolve()
     policy['staticShell']['executables'] = [{'name': 'python3', 'path': '/usr/bin/python3',
@@ -40,9 +41,15 @@ def main():
     if len(sys.argv) >= 2:
         supplied = json.loads(Path(sys.argv[1]).read_text())
         if 'staticShell' in supplied:
-            policy['staticShell'] = {**supplied['staticShell'], **policy['staticShell']}
+            policy['staticShell'] = {**supplied['staticShell'], **policy['staticShell'],
+                'executables': supplied['staticShell'].get('executables', []) + policy['staticShell']['executables']}
         else:
             policy['staticShell']['zshStartup'] = supplied
+    # The native test server uses a private HOME without user startup files.
+    startup = policy['staticShell'].get('zshStartup')
+    if startup:
+        startup['environment']['HOME'] = str(base/'home')
+        startup['absent'] += [str(base/'home'/name) for name in ['.zshenv', '.zshenv.zwc']]
     from build_python import profile as python_profile, pin as python_pin
     python = python_profile(sys.executable)
     python_exe = python['interpreter']['path']
@@ -51,7 +58,7 @@ def main():
     policy['staticShell']['executables'].append({**python['interpreter'], 'name': Path(python_exe).name})
     policy.setdefault('grantRules', []).extend([
         {'operation': 'python.import', 'target': name, 'targetType': 'exact', 'mode': 'allow'}
-        for name in ['pathlib', 'subprocess']])
+        for name in ['pathlib', 'subprocess', 'hashlib']])
     (config/'policy.json').write_text(json.dumps(policy)); (config/'policy.json').chmod(0o600)
     wrapper = config/'fixture'; wrapper.mkdir()
     (wrapper/'package.json').write_text(json.dumps({'name': 'static-fixture', 'type': 'module', 'exports': './index.mjs'}))
@@ -103,6 +110,12 @@ export default {id:'local.approval-review', async setup(ctx) {
                 time.sleep(.05)
             raise AssertionError('Timeout: '+str(base))
         cases = [('reads',f"cd '{repo}' && grep -n hello file; grep -n world file"),
+                 ('exit_flow', "false || exit 0; unmodeled_unreachable_fixture"),
+                 ('manifest_loop', 'while read -r f; do cat "$f"; done < files.txt'),
+                 ('generated_manifest', "printf '%s\\n' file > generated-list; while read -r f; do cat \"$f\"; done < generated-list"),
+                 ('python_invariant_loop', f"'{python_exe}' -I -S -B - <<'PY'\nfrom pathlib import Path\nfor line in Path('file').read_text().splitlines():\n    print(Path('file').read_text())\nPY"),
+                 ('invariant_loop', 'while read -r f; do cat file; done < files.txt'),
+                 ('python_verification', f"'{python_exe}' -I -S -B - <<'PY'\nfrom pathlib import Path\nimport hashlib\nprint(' '.join([hashlib.sha256(p.read_bytes()).hexdigest()[:8] for p in sorted(Path('tests').glob('*.py'))]))\nPY"),
                  ('empty_echo', "echo; echo 'manifest'; echo; cat file"),
                  ('probe','if grep -q hello file; then cat file; else head -n 1 file; fi'),
                  ('env_regex','set -euo pipefail; LC_ALL=C grep -n "hello\\|world" file'),

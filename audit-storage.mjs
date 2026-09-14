@@ -1,6 +1,7 @@
-import { mkdir, lstat, open, readdir, unlink } from 'node:fs/promises';
+import { mkdir, lstat, open } from 'node:fs/promises';
 import path from 'node:path';
-import { writeDetail, pruneDetails } from './audit-detail.mjs';
+import { scheduleAuditMaintenance } from './audit-maintenance.mjs';
+import { writeDetail } from './audit-detail.mjs';
 
 export async function writeAudit(root, record) {
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -28,16 +29,9 @@ export async function writeAudit(root, record) {
     const st = await file.stat();
     if (!st.isFile() || st.uid !== process.getuid() || st.mode & 0o077)
       throw new Error('Unsafe audit file');
-    if (st.size > 10 * 1024 * 1024) throw new Error('Daily audit size limit');
     await file.writeFile(JSON.stringify(stored) + '\n');
   } finally {
     await file.close();
   }
-  // Bound retention without inspecting unrelated files.
-  const cutoff = Date.now() - 14 * 86400000;
-  for (const name of await readdir(root)) {
-    if (/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name) && Date.parse(name.slice(0, 10)) < cutoff)
-      await unlink(path.join(root, name));
-  }
-  await pruneDetails(root, cutoff);
+  void scheduleAuditMaintenance(root);
 }

@@ -183,7 +183,8 @@ test('grant summary survives a long helper and legacy analysis remains readable'
     result: { effect: 'allow' },
   });
   assert.equal(p.data.grants.entries[1].grant.target, 'src/file');
-  assert.equal(p.capture.truncated, true);
+  assert.equal(p.capture.truncated, false);
+  assert.equal(p.data.helpers[0].length, 250000);
   assert.match(
     formatDetailedRecord(record({ diagnostics: { static: checked } })),
     /2 atomic grants/,

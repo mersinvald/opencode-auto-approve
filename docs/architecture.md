@@ -61,6 +61,22 @@ Repository, secret, policy, Beads, and test operations remain distinct. Reading 
 
 This system does not enforce permissions at the operating-system level. Files or environment state can change between review and actual execution.
 
+## Control flow and filename lists
+
+The gate can approve a union of possible effects. It does not need to predict which branch succeeds when every possible effect has permission.
+
+Working directories, path values, calls, and condition effects remain part of analysis. Unknown values only prevent approval when they can hide an effect.
+
+The shell adapter supports builtin `exit` with a literal status. It preserves termination within that shell and keeps pipeline termination separate. Fallible exit redirections remain incomplete.
+
+A `while read -r name` loop can use a bounded, newline-terminated filename list. The host records the content hash of an existing manifest. It does not execute the producer command.
+
+Generated manifests can use literal `printf`, shallow `find`, a supported prefix-removal `sed`, and C-locale `sort`. Their values and directory evidence remain in the audit.
+
+Unknown producers, changed manifests, and oversized lists require model review when loop effects depend on the list. Input-independent loop bodies can combine their fixed effects without resolving the input values.
+
+These rules check permission coverage. They do not prove that the command succeeds or terminates.
+
 ## Storage migration
 
 Version 3 stores no legacy command-specific approvals or observations. The first read backs up each version 2 store before migration. Backups remain beside the store with a `.backup` suffix and owner-only permissions.
@@ -83,4 +99,18 @@ The audit stores a compact grant snapshot before large command and helper eviden
 
 After a successful model rule save, the audit records the previous and new exact rules. It also resolves affected grants before and after that transaction. A proposed rule does not count as saved. Audit enrichment cannot block the store transaction.
 
+Audit storage has no daily quota, per-record size cap, capture truncation, or automatic expiry. It retains complete captured evidence after secret redaction. Files remain private and readers verify their hashes. Terminal views still use pagination and bounded log-tail reads. These do not remove stored evidence. Older records can still report missing or truncated details from earlier versions.
+
 `oc-approvals --details` displays these snapshots as readable text. `--json` includes the full stored payload. Missing, truncated, or unavailable evidence remains explicit. For older save events, the pretty viewer can recover earlier analysis from the same request within its bounded log scan.
+
+## Audit maintenance
+
+Audit writes schedule a metadata scan in the background. Scans run at most once every five minutes per process. They count daily summaries, detail files, and warning markers. They do not inspect unrelated files or follow links.
+
+A `maintenance` record reports storage above 1 GiB or a UTC day older than 14 days. The CLI and TUI display it as a warning. It has no permission outcome and cannot trigger an approval notification. Private marker files suppress repeat warnings for the same UTC day and threshold set across processes. Maintenance errors do not change permission decisions.
+
+`oc-approvals vacuum` removes whole UTC days older than `--keep-days`, which defaults to 14. `--max-size` can select additional prior days, oldest first. The current UTC day stays on disk. Use `--dry-run` to report candidate files and bytes without changing the audit directory. Use `--json` to return the plan as structured data.
+
+Vacuum reads retained summaries and preserves any older detail files that they reference. Thus, cleanup can leave storage above the requested size. The result reports this condition.
+
+Vacuum checks file ownership, permissions, types, and metadata before deletion. It stops if data changes or retained JSON is invalid. Run vacuum while OpenCode is idle. Unrelated files and directories stay unchanged.

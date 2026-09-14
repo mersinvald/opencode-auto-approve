@@ -8,7 +8,7 @@ import { digest, redact } from './policy.mjs';
 export const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 const badEnv =
   /^(BASH_ENV|ENV|IFS|ZDOTDIR|CDPATH|SHELLOPTS|BASHOPTS|PS[0-4]|PROMPT_COMMAND|GCONV_PATH|LOCPATH|NLSPATH|LIBPATH|SHLIB_PATH|GREP_OPTIONS|GREP_COLORS|POSIXLY_CORRECT|LD_.*|DYLD_.*|BASH_FUNC_.*|GIT_.*|BEADS_.*|BD_.*|DOLT_.*|PERL5.*|PERLIO|PYTHONPATH|PYTHONHOME|PYTHONSTARTUP|PYTHONINSPECT|PYTEST_ADDOPTS|PYTEST_PLUGINS)$/;
-const builtins = new Set(['true', 'false', 'pwd', 'printf', 'echo', 'test', '[', 'set']);
+const builtins = new Set(['true', 'false', 'pwd', 'printf', 'echo', 'exit', 'test', '[', 'set']);
 const unsafeEnvironment = (k, v) =>
   v &&
   badEnv.test(k) &&

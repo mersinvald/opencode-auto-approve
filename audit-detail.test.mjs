@@ -12,13 +12,7 @@ import {
   chmod,
 } from 'node:fs/promises';
 import path from 'node:path';
-import {
-  sanitizeAudit,
-  writeDetail,
-  readDetail,
-  DETAIL_MAX_BYTES,
-  extendDetail,
-} from './audit-detail.mjs';
+import { sanitizeAudit, writeDetail, readDetail, extendDetail } from './audit-detail.mjs';
 import { writeAudit } from './audit-storage.mjs';
 import { auditRecord } from './audit.mjs';
 import { readAudit, formatRecord, main } from './audit-view.mjs';
@@ -106,18 +100,36 @@ test('audit redaction covers structured credentials and Python, shell, PEM and U
   assert.ok(clean.data.command.includes('\n'));
 });
 
-test('byte and string caps are explicit, and sanitization precedes truncation', async () => {
-  const payload = sanitizeAudit(
-    { command: 'x'.repeat(300) + ' API_KEY=must-never-appear', more: 'a'.repeat(1000) },
-    { maxChars: 100, maxString: 80 },
-  );
-  assert.equal(payload.capture.truncated, true);
+test('large audit payloads retain full evidence after secret redaction', async () => {
+  const command = '😀'.repeat(160000) + ' API_KEY=must-never-appear';
+  const object = Object.fromEntries(Array.from({ length: 300 }, (_, i) => ['field' + i, i]));
+  const nested = Array.from({ length: 60 }).reduce((child) => ({ child }), 'deep evidence');
+  const payload = sanitizeAudit({
+    command,
+    object,
+    nested,
+    nodes: Array.from({ length: 18000 }, (_, i) => i),
+    credentials: Array.from({ length: 150 }, (_, i) => ({ apiKey: 'secret-' + i })),
+  });
+  assert.equal(payload.capture.truncated, false);
   assert.equal(payload.capture.redacted, true);
+  assert.deepEqual(payload.capture.omissions, []);
+  assert.deepEqual(payload.data.object, object);
+  assert.deepEqual(payload.data.nested, nested);
+  assert.equal(payload.data.nodes.length, 18000);
+  assert.equal(payload.data.nodes.at(-1), 17999);
+  // Use a non-secret container key so every nested redaction is recorded.
+  const manySecrets = sanitizeAudit({
+    entries: Array.from({ length: 150 }, () => ({ apiKey: 'hidden' })),
+  });
+  assert.equal(manySecrets.capture.redactions.length, 150);
   assert.ok(!JSON.stringify(payload).includes('must-never-appear'));
-  const ref = await writeDetail(root, sanitizeAudit({ command: '😀'.repeat(80000) }), day);
+  assert.equal(payload.data.command, '😀'.repeat(160000) + ' API_KEY=[REDACTED]');
+  const ref = await writeDetail(root, payload, day);
   assert.equal(ref.status, 'stored');
-  assert.ok(ref.bytes <= DETAIL_MAX_BYTES);
-  assert.equal(ref.truncated, true);
+  assert.ok(ref.bytes > 512 * 1024);
+  assert.equal(ref.truncated, false);
+  assert.deepEqual(await readDetail(root, ref), payload);
 });
 
 test('stored details are private, immutable, and hash-verified', async () => {
@@ -160,7 +172,7 @@ test('verbose storage failure is visible and does not block the compact audit', 
   assert.equal(row.details.status, 'unavailable');
 });
 
-test('daily verbose budget cannot make approval fail', async () => {
+test('detail writes and duplicate reads work beyond the former daily quota', async () => {
   const directory = path.join(root, 'quota');
   await mkdir(directory, { mode: 0o700 });
   await mkdir(path.join(directory, 'details'), { mode: 0o700 });
@@ -172,9 +184,11 @@ test('daily verbose budget cannot make approval fail', async () => {
   );
   await file.truncate(128 * 1024 * 1024);
   await file.close();
-  const ref = await writeDetail(directory, sanitizeAudit({ command: 'fixture' }), day);
-  assert.equal(ref.status, 'unavailable');
-  assert.equal(ref.code, 'detail_daily_budget');
+  const payload = sanitizeAudit({ command: 'fixture' });
+  const ref = await writeDetail(directory, payload, day);
+  assert.equal(ref.status, 'stored');
+  assert.deepEqual(await readDetail(directory, ref), payload);
+  assert.deepEqual(await writeDetail(directory, payload, day), ref);
 });
 
 test('null completion and tool-call entries remain classified failures with audit evidence', () => {
@@ -206,4 +220,38 @@ test('later native replies retain their own outcome and the model recommendation
   assert.equal(next.capture.redacted, true);
   const final = extendDetail(next, { status: 'closed', nativeApplied: 'deny', attempt: 2 });
   assert.equal(final.data.lifecycle.status, 'closed');
+});
+
+test('compact audit appends beyond the former 10 MiB daily limit', async () => {
+  const directory = path.join(root, 'large-compact');
+  await mkdir(directory, { mode: 0o700 });
+  const filename = path.join(directory, day + '.jsonl');
+  const existingBytes = 11 * 1024 * 1024;
+  const file = await open(filename, 'w', 0o600);
+  await file.truncate(existingBytes);
+  await file.close();
+  const record = { time: day + 'T12:00:00Z', applied: 'allow', code: 'fixture' };
+  await writeAudit(directory, record);
+  const reader = await open(filename, 'r');
+  try {
+    const expected = JSON.stringify(record) + '\n';
+    const tail = Buffer.alloc(Buffer.byteLength(expected));
+    await reader.read(tail, 0, tail.length, existingBytes);
+    assert.equal(tail.toString(), expected);
+    assert.equal((await reader.stat()).size, existingBytes + tail.length);
+  } finally {
+    await reader.close();
+  }
+});
+
+test('new writes preserve old summaries and detail files', async () => {
+  const directory = path.join(root, 'history');
+  const oldDay = '2000-01-01';
+  const payload = sanitizeAudit({ command: 'old audit evidence' });
+  await writeAudit(directory, { time: oldDay + 'T00:00:00Z', detailPayload: payload });
+  const filename = path.join(directory, oldDay + '.jsonl');
+  const oldSummary = await readFile(filename, 'utf8');
+  await writeAudit(directory, { time: day + 'T00:00:00Z' });
+  assert.equal(await readFile(filename, 'utf8'), oldSummary);
+  assert.deepEqual(await readDetail(directory, JSON.parse(oldSummary).details), payload);
 });

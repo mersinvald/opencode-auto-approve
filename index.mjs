@@ -572,7 +572,8 @@ export function createApprovalPlugin({ generate: override } = {}) {
         await ctx.tool.transform((editor) =>
           editor.add({
             name: 'approval_scratch',
-            description: 'Return the private scratch directory for this session.',
+            description:
+              'Return this session’s private scratch directory. Use it for pytest --basetemp and disposable test outputs. Each worker must request its own directory.',
             input: { type: 'object', properties: {}, additionalProperties: false },
             options: { codemode: true, permission: 'approval_scratch' },
             execute: async (_, tool) => ({

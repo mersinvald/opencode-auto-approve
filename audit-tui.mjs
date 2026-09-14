@@ -112,6 +112,24 @@ export default {
         }
       };
       const card = (record) => {
+        if (record.kind === 'maintenance')
+          return element(
+            'box',
+            {
+              width: '100%',
+              flexDirection: 'column',
+              flexShrink: 0,
+              border: ['left'],
+              borderColor: color('ask'),
+              paddingLeft: 1,
+              marginBottom: 1,
+            },
+            [
+              text('WARNING · Audit storage', color('ask'), true),
+              muted(new Date(record.time).toLocaleString()),
+              text(record.reason),
+            ],
+          );
         const decision =
           record.action === 'scoped_permission' || record.applied === 'pending'
             ? statusLabel(record.status)

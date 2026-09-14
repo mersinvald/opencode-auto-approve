@@ -5,6 +5,7 @@ import { canonical, digest, secretPath, policyPath, requestDirectory, within } f
 import { parseShell, attestRuntime, executableResolver } from './shell-host.mjs';
 import { pythonInvocation } from './python-invocation.mjs';
 import { parsePythonSource, readPythonHelper, attestPythonEnvironment } from './python-host.mjs';
+import { manifestLines } from './shell-lines.mjs';
 import { pythonEffects } from './python-effects.mjs';
 import { repositoryScope } from './repository-scope.mjs';
 import { literal, expandWord, arrayExpansion } from './shell-words.mjs';
@@ -241,6 +242,11 @@ export async function extractAction(request, { scope, config, runtime, permissio
           )
             return;
           fail('shell_options');
+        }
+        if (name === 'exit' && executable === 'builtin:exit') {
+          if (args.length > 1 || (args.length && !/^[+-]?\d{1,20}$/.test(args[0])))
+            fail('exit_arguments');
+          return;
         }
         if (name === 'echo') return;
         if (
@@ -884,12 +890,48 @@ export async function extractAction(request, { scope, config, runtime, permissio
                 pythonSource: scriptPath ?? '<inline>',
                 sha256: parsed.sourceSha256,
               });
-              const effects = pythonEffects(parsed.ast, {
-                cwd: state.cwd,
-                scriptPath,
-                source: scriptPath ?? '<inline>',
-                argv: invocation.argv,
-              });
+              const globResults = Object.create(null);
+              const inspectPython = () =>
+                pythonEffects(parsed.ast, {
+                  cwd: state.cwd,
+                  scriptPath,
+                  source: scriptPath ?? '<inline>',
+                  argv: invocation.argv,
+                  globResults,
+                });
+              let effects = inspectPython();
+              for (let pass = 0; pass < 4; pass++) {
+                const pending = effects.effects.filter(
+                  (e) => e.kind === 'glob' && !Object.hasOwn(globResults, e.key),
+                );
+                if (!pending.length || !profile) break;
+                if (pending.length > 16) fail('python_glob_limit');
+                for (const glob of pending) {
+                  const directory = await target(glob.target, state.cwd, 'list', 'directory');
+                  const entries = (await readdir(directory)).sort();
+                  if (entries.length > 1024) fail('python_glob_limit');
+                  const pattern = new RegExp(
+                    '^' +
+                      [...glob.pattern]
+                        .map((c) =>
+                          c === '*'
+                            ? '.*'
+                            : c === '?'
+                              ? '.'
+                              : c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+                        )
+                        .join('') +
+                      '$',
+                    'us',
+                  );
+                  const matches = entries.filter((name) => pattern.test(name));
+                  if (matches.length > 32) fail('python_glob_limit');
+                  globResults[glob.key] = matches.map((name) => path.join(glob.target, name));
+                  globRoots.add(directory);
+                  snapshots.push({ pythonGlob: directory, pattern: glob.pattern, entries });
+                }
+                effects = inspectPython();
+              }
               for (const issue of effects.unresolved) unresolved(issue.reason, issue);
               for (const effect of effects.effects) {
                 sourceLocation = {
@@ -904,6 +946,8 @@ export async function extractAction(request, { scope, config, runtime, permissio
                       add('python.import', effect.module ?? '<relative>', 'exact');
                     if (!profile?.modules?.[effect.module] || effect.level)
                       unresolved('python_import_unverified', sourceLocation);
+                  } else if (effect.kind === 'glob') {
+                    await target(effect.target, state.cwd, 'list', 'directory');
                   } else if (effect.kind === 'file') {
                     if (
                       effect.operation === 'files.delete' &&
@@ -1063,8 +1107,52 @@ export async function extractAction(request, { scope, config, runtime, permissio
         }
         fail('unsupported_command');
       };
+      const manifestChanged = (file, generation = 0) =>
+        [...changed].some(([p, n]) => n > generation && (within(file, p) || within(p, file)));
       const sequence = async (stmts, states, piped = false) => {
-        for (const stmt of stmts ?? []) states = await walk(stmt, states, piped);
+        for (const stmt of stmts ?? []) {
+          const earlierWrites = new Map(changed);
+          states = await walk(stmt, states, piped);
+          let output = stmt;
+          while (output.Cmd?.Type === 'BinaryCmd' && output.Cmd.Op === '|') output = output.Cmd.Y;
+          if (output.Redirs?.length !== 1 || output.Redirs[0].Op !== '>' || output.Redirs[0].N)
+            continue;
+          for (const state of states) {
+            if (state.terminated) continue;
+            const lines = await manifestLines(stmt, {
+              vars: state.vars,
+              cwd: state.cwd,
+              locale:
+                state.environment?.LC_ALL ??
+                (state.commandHost ?? host).runtimeEnvironment.LC_ALL ??
+                (state.commandHost ?? host).runtimeEnvironment.LC_COLLATE ??
+                (state.commandHost ?? host).runtimeEnvironment.LANG,
+              directory: async (root) => {
+                const resolved = await target(root, state.cwd, 'list');
+                const entries = await readdir(resolved, { withFileTypes: true });
+                if (entries.length > 512) fail('manifest_limit');
+                const snapshot = entries.map((e) => ({ name: e.name, file: e.isFile() }));
+                globRoots.add(resolved);
+                snapshots.push({ shellManifestDirectory: resolved, entries: snapshot });
+                return snapshot;
+              },
+            });
+            if (!lines || lines.unordered) continue;
+            const file = await canonical(literal(output.Redirs[0].Word, state.vars), state.cwd);
+            if ([...earlierWrites.keys()].some((p) => within(file, p) || within(p, file))) continue;
+            const existing = await lstat(file).catch((e) => {
+              if (e.code !== 'ENOENT') throw e;
+            });
+            if (existing) {
+              const old = await readPythonHelper(file);
+              // A failed producer can leave the old manifest intact.
+              if (old.body !== lines.join('\n') + (lines.length ? '\n' : '')) continue;
+              snapshots.push({ shellManifest: file, priorSha256: old.sha256 });
+            }
+            state.lineFiles = { ...state.lineFiles, [file]: { lines, generation: mutation } };
+            snapshots.push({ shellManifest: file, generated: true, lines });
+          }
+        }
         return states;
       };
       const substitution = async (part, state) => {
@@ -1094,6 +1182,16 @@ export async function extractAction(request, { scope, config, runtime, permissio
       };
       const walk = async (stmt, states, piped = false) => {
         if (!states.length) return [];
+        const stopped = states.filter((s) => s.terminated);
+        if (stopped.length)
+          return [
+            ...stopped,
+            ...(await walk(
+              stmt,
+              states.filter((s) => !s.terminated),
+              piped,
+            )),
+          ];
         if (++visits > 256 || states.length > 16 || items.size > 128) fail('analysis_limit');
         if (!stmt || stmt.Background || stmt.Coprocess || stmt.Disown || stmt.Negated)
           fail('unsupported_statement');
@@ -1220,6 +1318,110 @@ export async function extractAction(request, { scope, config, runtime, permissio
               : await sequence(cmd.Else.Then, failed, piped);
           return [...yes, ...no];
         }
+        if (cmd?.Type === 'WhileClause') {
+          const whileFail = (reason) =>
+            fail(reason, {
+              commandIndex: null,
+              source: '<shell>',
+              line: stmt.Pos?.Line,
+              column: stmt.Pos?.Col,
+            });
+          const condition = cmd.Cond?.[0];
+          if (
+            cmd.Until ||
+            cmd.Cond?.length !== 1 ||
+            condition.Redirs?.length ||
+            condition.Negated ||
+            condition.Cmd?.Type !== 'CallExpr' ||
+            condition.Cmd.Assigns?.length
+          )
+            whileFail('while_read_condition');
+          const result = [];
+          for (let state of states) {
+            const args = condition.Cmd.Args.map((w) => literal(w, state.vars));
+            const variable = args[2];
+            if (
+              args.length !== 3 ||
+              args[0] !== 'read' ||
+              args[1] !== '-r' ||
+              !nameRE.test(variable ?? '') ||
+              special.test(variable) ||
+              Object.hasOwn(state.arrays, variable)
+            )
+              whileFail('while_read_condition');
+            if (!state.inputFile || !state.inputFileFresh || stmt.Redirs?.length !== 1)
+              whileFail('while_read_source');
+            const file = state.inputFile,
+              proof = state.lineFiles?.[file];
+            result.push({ ...state, exit: false });
+            const dependsOnInput = (node) => {
+              if (!node || typeof node !== 'object') return false;
+              if (node.Type === 'ParamExp' && node.Param?.Value === variable) return true;
+              if (node.Type === 'CallExpr' && node.Assigns?.length) return true;
+              return Object.values(node).some((v) =>
+                Array.isArray(v) ? v.some(dependsOnInput) : dependsOnInput(v),
+              );
+            };
+            if (!cmd.Do.some(dependsOnInput)) {
+              const active = await sequence(
+                cmd.Do,
+                [{ ...state, vars: { ...state.vars, [variable]: '' } }],
+                true,
+              );
+              result.push(
+                { ...state, vars: { ...state.vars, [variable]: '' }, exit: true },
+                ...active,
+              );
+              continue;
+            }
+            let lines;
+            if (proof && !manifestChanged(file, proof.generation)) lines = proof.lines;
+            else {
+              if (manifestChanged(file)) whileFail('while_manifest_modified');
+              const source = await readPythonHelper(file).catch((e) => whileFail(e.message));
+              if (source.body && !source.body.endsWith('\n'))
+                whileFail('while_manifest_terminator');
+              lines = source.body ? source.body.slice(0, -1).split('\n') : [];
+              authority.add(file);
+              snapshots.push({ shellManifest: file, sha256: source.sha256 });
+            }
+            if (
+              lines.length > 32 ||
+              lines.some((line) => !line || line.length > 4096 || /[^\x21-\x7e]/.test(line))
+            )
+              whileFail('while_manifest_values');
+            const generation = mutation;
+            let active = [state];
+            for (const line of lines) {
+              active = active.map((s) =>
+                s.terminated ? s : { ...s, vars: { ...s.vars, [variable]: line } },
+              );
+              active = await sequence(cmd.Do, active, true);
+              result.push(
+                ...active
+                  .filter((s) => !s.terminated)
+                  .map((s) => {
+                    const vars = { ...s.vars };
+                    delete vars[variable];
+                    return { ...s, vars, exit: undefined };
+                  }),
+              );
+            }
+            if (manifestChanged(file, generation)) whileFail('while_manifest_modified');
+            result.push(
+              ...active.map((s) =>
+                s.terminated
+                  ? s
+                  : {
+                      ...s,
+                      vars: { ...s.vars, [variable]: '' },
+                      exit: lines.length ? undefined : true,
+                    },
+              ),
+            );
+          }
+          return result;
+        }
         if (
           cmd?.Type === 'ForClause' &&
           cmd.Loop?.Type === 'WordIter' &&
@@ -1331,6 +1533,12 @@ export async function extractAction(request, { scope, config, runtime, permissio
                 };
               if (state.outputPath || stmt.Redirs?.some((r) => r.Op === '>' || r.Op === '>>'))
                 state.outputKind = undefined;
+              if (argv[0] === 'exit') {
+                // A failed redirection can skip exit and continue the shell.
+                if (stmt.Redirs?.length) fail('exit_redirection');
+                state.terminated = true;
+                state.exit = argv.length === 2 ? BigInt(argv[1]) % 256n === 0n : undefined;
+              }
               if (!stmt.Redirs?.length && (argv[0] === 'true' || argv[0] === 'false'))
                 state.exit = argv[0] === 'true';
             }

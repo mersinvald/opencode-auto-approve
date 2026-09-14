@@ -30,7 +30,25 @@ Finite `for` loops accept known lists, tuples, or `range` values. Each loop can 
 
 Unknown conditions cause analysis of both branches. Different values merge to unknown. If a later operation needs that value, it requires model review.
 
-The analyzer does not run predicates against live files. Generators, classes, decorators, closures, reflection, dynamic imports, and unknown loops remain incomplete.
+The analyzer does not run predicates against live files. Generators, classes, decorators, closures, reflection, and dynamic imports remain incomplete.
+
+## Verification scripts and loops
+
+The analyzer supports finite list comprehensions without filters or nested generators. It also supports selected string, sequence, mapping, JSON, and SHA-256 operations.
+
+String slices preserve known values or their known scalar type. Hash results remain unknown strings. The analyzer does not compute a requested file hash.
+
+Unknown loop counts do not always require model review. Loops over builtin string lists can combine effects without reading the strings. A loop that writes one fixed output can use its existing file grant.
+
+Loop analysis combines zero iterations with repeated iterations. Changed bindings become unknown. An unknown path, callable, iterator protocol, or process argument still requires review.
+
+Conditions also produce effects. A callback cannot bypass review because both branches have allowed file operations.
+
+`Path.glob()` supports one directory and simple `*` or `?` patterns. The host records directory entries and resolves at most 32 matches. Recursive patterns remain incomplete.
+
+The host includes these entries in the evidence fingerprint. A changed entry requires another evaluation. A command that also changes the inspected directory remains incomplete.
+
+Use a registered interpreter with `-I -S -B` for standard-library verification helpers. Keep pytest and project imports on their assigned project interpreter. Isolation flags must not disable required test dependencies.
 
 ## Process calls
 

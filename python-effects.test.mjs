@@ -208,3 +208,54 @@ test('ambiguous paths, closure mutation, recursion and dynamic loops remain inco
   ])
     assert.equal(inspect(source).semanticComplete, false, source);
 });
+
+test('finite verification dataflow preserves reads through hashes, comprehensions and slicing', () => {
+  const r = inspect(`from pathlib import Path
+import hashlib, json
+names=sorted(['z','a'])
+fps=[hashlib.sha256(Path(name).read_bytes()).hexdigest()[:16] for name in names]
+print(' '.join(fps), len(fps))
+print(json.loads(Path('result.json').read_text()))
+print('a\\nb\\n'.splitlines())
+for name in sorted({'x':'a','y':'b'}.values()):
+    print(Path(name).read_text())
+`);
+  assert.equal(r.semanticComplete, true, JSON.stringify(r.unresolved));
+  assert.deepEqual(
+    files(r).map(([, p]) => p.split('/').at(-1)),
+    ['a', 'z', 'result.json', 'a', 'b'],
+  );
+});
+
+test('verification helpers do not authorize callbacks, arbitrary methods or dynamic paths', () => {
+  for (const source of [
+    "import json\njson.loads('{}', object_hook=unknown)",
+    "sorted(['a'],key=unknown)",
+    "from pathlib import Path\nPath('a').read_text().dangerous()",
+    "from pathlib import Path\nPath(Path('a').read_text().encode()).write_text('x')",
+    'from pathlib import Path\n[Path(x).read_text() for x in unknown]',
+    "from pathlib import Path\nlist(Path('a').glob('**/*'))",
+    "from pathlib import Path\n[Path(x).read_text() for x in ['a'] if unknown]",
+    "from pathlib import Path\n(Path('a').unlink() for x in ['a'])",
+  ])
+    assert.equal(inspect(source).semanticComplete, false, source);
+});
+
+test('unknown loop counts can use a union of invariant effects without evaluating data', () => {
+  for (const source of [
+    "from pathlib import Path\nfor line in Path('input').read_text().splitlines():\n    Path('out').write_text('ok')",
+    "from pathlib import Path\nwhile Path('flag').exists():\n    Path('out').write_text('ok')",
+  ]) {
+    const r = inspect(source);
+    assert.equal(r.semanticComplete, true, JSON.stringify(r.unresolved));
+    assert.ok(files(r).some(([op, p]) => op === 'files.write' && p.endsWith('/out')));
+  }
+});
+test('loop-carried paths, unknown iterators and element-dependent paths still require review', () => {
+  for (const source of [
+    "from pathlib import Path\nfor line in Path('input').read_text().splitlines():\n    Path(line).read_text()",
+    "from pathlib import Path\np='a'\nwhile Path('flag').exists():\n    Path(p).read_text()\n    p=p+'x'",
+    "from pathlib import Path\nfor line in unknown():\n    Path('a').read_text()",
+  ])
+    assert.equal(inspect(source).semanticComplete, false, source);
+});

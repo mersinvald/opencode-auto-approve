@@ -88,6 +88,18 @@ Colors distinguish approvals (green), requests for approval (amber), denials (re
 
 Detailed local records support deeper investigation. They describe permission decisions, not proof that a command ran or succeeded. See [audit data and privacy](SECURITY.md).
 
+Audit history stays on disk until you remove it. A storage warning appears when audit data exceeds 1 GiB or includes UTC days older than 14 days. These warnings do not block approvals or delete data.
+
+Use `vacuum` for manual cleanup. Run it while OpenCode is idle:
+
+```sh
+oc-approvals vacuum --dry-run
+oc-approvals vacuum
+oc-approvals vacuum --max-size 1GiB --dry-run
+```
+
+The default removes whole UTC days older than 14 days. Use `--keep-days N` to change that age. Use `--max-size` to select more days, oldest first, until storage approaches the requested size. This can include days within the retention period. Current-day data and details referenced by retained records stay on disk. `--dry-run` shows the plan without deleting files. See [audit maintenance](docs/architecture.md#audit-maintenance) for warning frequency and cleanup checks.
+
 On macOS, notifications alert you when review escalates, fails, or remains pending for five minutes. Run **`/approval-notification-test`** to check notification delivery.
 
 ## Start with useful defaults

@@ -249,7 +249,7 @@ test('unsupported syntax after echo points to the shell node, not the previous c
     [['echo']],
   );
   const diagnostic = grantSnapshot(result).unresolved[0];
-  assert.equal(diagnostic.reason, 'shell_syntax:WhileClause');
+  assert.equal(diagnostic.reason, 'while_read_source');
   assert.equal(diagnostic.commandIndex, null);
   assert.equal(diagnostic.command, undefined);
   assert.equal(diagnostic.source, '<shell>');

@@ -343,6 +343,29 @@ test('pytest output flags reuse test grants and basetemp includes its deletion e
   );
   const granted = initial.analysis.grants.filter((g) => g.operation !== 'files.delete').map(allow);
   assert.equal((await inspect(request, granted, { runtime, config: pinned })).decision, 'dynamic');
+  const workerScratch = base + '/worker-scratch';
+  await mkdir(workerScratch, { mode: 0o700 });
+  const ownCommand = command.replace('../pytest-results', workerScratch + '/pytest-results');
+  const ownRequest = {
+    ...request,
+    resources: [ownCommand],
+    tool: { name: 'shell', input: { command: ownCommand, workdir: one } },
+  };
+  const ownContext = {
+    runtime: { ...runtime, command: ownCommand },
+    config: pinned,
+    scope: { ...scope, scratch: workerScratch, readableAncestorScratch: [base] },
+  };
+  const ownInitial = await inspect(ownRequest, [], ownContext);
+  const ownRules = ownInitial.analysis.grants
+    .filter((g) => g.operation !== 'files.delete')
+    .map(allow);
+  assert.equal((await inspect(ownRequest, ownRules, ownContext)).decision, 'allow');
+  assert.equal(
+    (await inspect(request, granted, { runtime, config: pinned, scope: ownContext.scope }))
+      .decision,
+    'dynamic',
+  );
   const deletion = initial.analysis.grants.find((g) => g.operation === 'files.delete');
   assert.equal(
     (
@@ -410,4 +433,103 @@ test('migration merges worktree observations and retains explicit legacy restric
     runtime: { command, cwd: one, shell: '/bin/bash', env: { PATH: '/usr/bin:/bin' } },
   });
   assert.equal(checked.decision, 'ask');
+});
+
+const inspectExit = (command) =>
+  inspect(
+    {
+      action: 'shell',
+      effect: 'ask',
+      resources: [command],
+      directory: main,
+      tool: { name: 'shell', input: { command, workdir: main } },
+    },
+    [],
+    { runtime: { command, cwd: main, shell: '/bin/bash', env: { PATH: '/usr/bin:/bin' } } },
+  );
+
+test('exit terminates only the reachable shell branch', async () => {
+  for (const command of [
+    'exit; unknown',
+    'exit 1 || unknown',
+    'false || exit 2; unknown',
+    'true && exit 0; unknown',
+    'if true; then exit 1; fi; unknown',
+    'for x in a b; do exit 0; done; unknown',
+  ]) {
+    const r = await inspectExit(command);
+    assert.equal(r.analysis.complete, true, JSON.stringify(r.analysis.unresolved));
+    assert.equal(r.decision, 'allow', command);
+    assert.ok(!r.analysis.commands.some((c) => c.argv[0] === 'unknown'));
+  }
+  for (const command of [
+    'false && exit 1; unknown',
+    'true || exit 0; unknown',
+    'exit 1 | cat; unknown',
+    'if test -f src/file; then exit 0; fi; unknown',
+  ]) {
+    const r = await inspectExit(command);
+    assert.equal(r.analysis.complete, false, command);
+    assert.ok(
+      r.analysis.commands.some((c) => c.argv[0] === 'unknown'),
+      command,
+    );
+  }
+});
+
+test('invalid exit arguments and fallible redirections stay incomplete', async () => {
+  for (const command of ['exit 1 2; unknown', 'exit --; unknown', 'exit 0 > out; unknown']) {
+    const r = await inspectExit(command);
+    assert.equal(r.analysis.complete, false, command);
+    assert.ok(r.analysis.unresolved.some((u) => u.reason.startsWith('exit_')));
+  }
+});
+
+test('bounded while read follows existing and generated manifest values', async () => {
+  await writeFile(main + '/files.txt', 'src/file\n');
+  for (const command of [
+    'while read -r f; do cat "$f"; done < files.txt',
+    'printf \'%s\\n\' src/file > list.txt; while read -r f; do cat "$f"; done < list.txt',
+  ]) {
+    const r = await inspectExit(command);
+    assert.equal(r.analysis.complete, true, JSON.stringify(r.analysis.unresolved));
+    assert.ok(
+      r.analysis.grants.some((g) => g.operation === 'files.read' && g.target.endsWith('/src/file')),
+    );
+  }
+  await writeFile(main + '/files.txt', 'src/file\n');
+  const first = await inspectExit('while read -r f; do cat "$f"; done < files.txt');
+  await writeFile(main + '/files.txt', 'src/file\nsrc/new\n');
+  const second = await inspectExit('while read -r f; do cat "$f"; done < files.txt');
+  assert.notEqual(first.fingerprint, second.fingerprint);
+});
+
+test('while read refuses stale, modified, unbounded and unsupported sources', async () => {
+  await writeFile(main + '/files.txt', 'src/file\n');
+  for (const command of [
+    'echo src/file > files.txt; while read -r f; do cat "$f"; done < files.txt',
+    'while read -r f; do echo "$f" > files.txt; done < files.txt',
+    'while read f; do cat "$f"; done < files.txt',
+    'while true; do cat src/file; done',
+    'while read -r f; do unknown "$f"; done < files.txt',
+  ])
+    assert.equal((await inspectExit(command)).analysis.complete, false, command);
+});
+
+test('shell loops with invariant effects do not need to resolve their input data', async () => {
+  await writeFile(main + '/many-lines', Array(100).fill('unknown-data').join('\n') + '\n');
+  const r = await inspectExit('while read -r f; do cat src/file; done < many-lines');
+  assert.equal(r.analysis.complete, true, JSON.stringify(r.analysis.unresolved));
+  assert.equal(r.decision, 'allow');
+  const dependent = await inspectExit('while read -r f; do cat "$f"; done < many-lines');
+  assert.equal(dependent.analysis.complete, false);
+});
+
+test('generated manifests cannot replace unknown old contents or earlier writes in the proof', async () => {
+  await writeFile(main + '/poison-list', '/unapproved/target\n');
+  for (const command of [
+    'printf \'%s\\n\' src/file > poison-list; while read -r f; do cat "$f"; done < poison-list',
+    'echo poison > stale-list; printf \'%s\\n\' src/file > stale-list; while read -r f; do cat "$f"; done < stale-list',
+  ])
+    assert.equal((await inspectExit(command)).analysis.complete, false, command);
 });

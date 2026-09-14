@@ -190,3 +190,33 @@ test('changed runtime code and new import candidates prevent static approval', a
   assert.equal(blocked.analysis.complete, false);
   assert.ok(blocked.analysis.unresolved.some((u) => u.reason === 'python_environment_changed'));
 });
+
+test('Python globs bind file reads to a bounded directory snapshot and invalidate changes', async () => {
+  const dir = root + '/schemas';
+  await mkdir(dir);
+  await writeFile(dir + '/one.json', '{}');
+  await writeFile(dir + '/two.json', '{}');
+  const command = commandFor(`from pathlib import Path
+import hashlib
+hashes=[hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(Path('schemas').glob('*.json'))]
+print(' '.join(hashes),len(hashes))`);
+  const first = await inspect(command);
+  assert.equal(first.analysis.complete, true, JSON.stringify(first.analysis.unresolved));
+  assert.equal((await inspect(command, first.analysis.grants.map(allow))).decision, 'allow');
+  assert.ok(first.analysis.snapshots.some((s) => s.pythonGlob === dir && s.entries.length === 2));
+  await writeFile(dir + '/three.json', '{}');
+  const second = await inspect(command, first.analysis.grants.map(allow));
+  assert.notEqual(first.fingerprint, second.fingerprint);
+  assert.ok(
+    second.analysis.grants.some(
+      (g) => g.operation === 'files.read' && g.target.endsWith('/three.json'),
+    ),
+  );
+  const modified = await inspect(
+    commandFor(`from pathlib import Path
+for p in Path('schemas').glob('*.json'):
+    p.write_text('changed')`),
+  );
+  assert.equal(modified.analysis.complete, false);
+  assert.ok(modified.analysis.unresolved.some((u) => u.reason === 'glob_modified_in_command'));
+});
