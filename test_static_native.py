@@ -1,4 +1,4 @@
-"""Run fixture-only reads through OpenCode's actual native shell tool."""
+"""Run fixture-only reads and edits through OpenCode's actual native shell tool."""
 from pathlib import Path
 import base64, copy, hashlib, json, shutil, sqlite3, subprocess, sys, tempfile, time
 source = Path(__file__).resolve().parent
@@ -10,6 +10,7 @@ def main():
     repo = base/'repo'; repo.mkdir()
     external = base/'external'; external.mkdir(); (external/'file').write_text('External fixture read.\n')
     (repo/'file').write_text('hello\nworld\n')
+    (repo/'sed-edit').write_text('before\n')
     (repo/'tests').mkdir()
     for name in ['test_phase1_one.py','test_phase1_two.py']:(repo/'tests'/name).write_text('# Fixture selection only.\n')
     # Synthetic runner: test the native permission path and shell glob expansion,
@@ -31,6 +32,7 @@ def main():
       'grantRules': [{'operation':'files.read','target':str(external/'file'),'targetType':'file','mode':'allow'},
                      {'operation':'tests.run','target':str(repo/'tests'),'targetType':'directory','mode':'allow'}],
       'staticShell': {'enabled': True, 'probeReadConditions': True, 'parser': {'path': str(parser), 'sha256': hashlib.sha256(parser.read_bytes()).hexdigest()}}}
+    policy['grantRules'] += [{'operation':'files.write','target':str(repo/name),'targetType':'file','mode':'allow'} for name in ['sed-edit','sed-edit.bak']]
     # Linux Python aliases resolve to a versioned binary. Pin this inspected fixture interpreter.
     python = Path('/usr/bin/python3').resolve()
     policy['staticShell']['executables'] = [{'name': 'python3', 'path': '/usr/bin/python3',
@@ -100,6 +102,8 @@ export default {id:'local.approval-review', async setup(ctx) {
                  ('null_sink',"git status --short; find tests -type f 2>/dev/null | wc -l; cat </dev/null >/dev/null"),
                  ('git_inspection',"git -C . --no-pager status --short tests; git branch -avv; git show --stat HEAD; git ls-tree --name-only HEAD tests"),
                  ('inspection_filters',"grep -n hello file | sed 's/^/  /' | sort -u -t: -k1,1 | uniq -c; find . -path ./.git -prune -o -type f -print | head -20; test ! -d venv; echo ---; cmp file file"),
+                 ('sed_reads',"sed -nE -e '1, 2 p' -e '/hello/p' file; sed 's|hello|hi|g; /world/d' file"),
+                 ('sed_edits',"sed -i.bak 's/before/after/' sed-edit"),
                  ('status_path','git --no-pager status --short --untracked-files=all -- file'),
                  ('array_read','READ=(cat file); "${READ[@]}" | grep -A1 hello'),
                  ('pytest_glob','PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q -p no:cacheprovider tests/test_phase1_*.py'),
@@ -136,6 +140,12 @@ export default {id:'local.approval-review', async setup(ctx) {
                 if name=='delayed_directory':
                     directory=next(r for r in records() if r['sessionID']==sid and r['code']=='model_allow_always' and r['action']=='external_directory')
                     assert directory['elapsedMs']>=11000,directory
+                if name=='sed_edits':
+                    assert (repo/'sed-edit').read_text()=='after\n'
+                    assert (repo/'sed-edit.bak').read_text()=='before\n'
+                    grants=detail['data']['diagnostics']['static']['analysis']['grants']
+                    for filename in ['sed-edit','sed-edit.bak']:
+                        assert any(g['operation']=='files.write' and g['target']==str(repo/filename) for g in grants),grants
                 if name=='probe': assert detail['data']['diagnostics']['static']['analysis']['complete']
                 checks.append({'case':name,'code':row['code'],'elapsedMs':row['elapsedMs']})
             else:
@@ -148,7 +158,7 @@ export default {id:'local.approval-review', async setup(ctx) {
                 assert any(e['kind']=='model' for e in events())
                 api.call('POST',f'/api/session/{sid}/permission/{pending[0]["id"]}/reply',{'reply':'reject'})
                 checks.append({'case':name,'dialog':True,'unverifiedExecutableReviewed':True})
-    result={'base':str(base),'checks':checks,'commandsExecuted':'fixture reads, pinned linter, and synthetic pytest runner; fallback rejected'}
+    result={'base':str(base),'checks':checks,'commandsExecuted':'fixture reads and sed edits, pinned linter, and synthetic pytest runner; fallback rejected'}
     assert hashlib.sha256((repo/'fixture.db').read_bytes()).hexdigest()==database_hash
     (base/'report.json').write_text(json.dumps(result,indent=2)); print(json.dumps(result))
 

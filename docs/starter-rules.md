@@ -35,6 +35,28 @@ Shell examples require the parser and verified executable identities. Unsupporte
 
 A path rule does not cover a similarly named sibling directory. A grant for `/work/app` does not cover `/work/app-backup`.
 
+## Sed reads and edits
+
+The shell parser converts supported `sed` commands into the same file grants used by native reads and edits. It does not create a separate permission for each expression.
+
+| Command                                     | Requested grants                              |
+| ------------------------------------------- | --------------------------------------------- |
+| `sed -n '1,20p' file`                       | Read `file`.                                  |
+| `sed -E -e 's/old/new/g' -e '/skip/d' file` | Read `file`; output goes to the shell stream. |
+| `sed -i '' 's/old/new/' file` on macOS      | Read and write `file`.                        |
+| `sed -i 's/old/new/' file` with GNU sed     | Read and write `file`.                        |
+| `sed -i.bak 's/old/new/' file`              | Read and write `file`, plus write `file.bak`. |
+| `sed 'r extra' file`                        | Read `file` and `extra`.                      |
+| `sed 's/old/new/w output' file`             | Read `file` and write `output`.               |
+
+Existing rules decide the result: all requested grants must allow the action for it to pass immediately. An Always ask rule goes to the user. An ungranted effect goes to the model. Backup destinations, secrets, protected files, and read-only roles retain their permission boundaries.
+
+Supported expressions include addresses and ranges, print and delete commands, substitutions with common delimiters, multiple `-e` expressions, command blocks, and literal `r`/`w` targets. The parser unions the file effects across branches without running sed. It recognizes the different macOS and GNU `-i` argument conventions.
+
+External script files (`-f`), text insertion commands (`a`, `i`, `c`), execution (`e` or `s///e`), ambiguous filenames, and syntax the parser cannot fully account for go to model review. In-place edits through a final symlink, backup path templates, and commands that mutate their own glob or executable inputs also require review.
+
+See the [GNU sed reference](https://www.gnu.org/software/sed/manual/sed.html) and [BSD sed reference](https://man.freebsd.org/cgi/man.cgi?query=sed&sektion=1) for command syntax.
+
 ## What remains Dynamic
 
 Project edits, test execution, builds, Beads operations, and unfamiliar native actions do not receive blanket approval from the starter policy.

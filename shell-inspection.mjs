@@ -1,12 +1,13 @@
-// Deliberately small data-language grammars. No filter or shell code is executed.
-export function safeSed(program, quiet) {
-  // Only print with numeric, end-of-file, or slash-regex addresses. No sed
-  // commands, e/w flags, newline separators, or alternate delimiters.
-  const address = String.raw`(?:\d{1,6}|\$|/(?:[^/\\\r\n]|\\[^\r\n])*/)`;
-  if (quiet && new RegExp(`^${address}(,${address})?p$`).test(program)) return true;
-  // One substitution, slash delimiter, no e/w flags or additional commands.
-  // Escaped slash is handled as data; a literal newline is never a separator.
-  return /^s\/(?:[^/\\\r\n]|\\[^\r\n])*\/(?:[^/\\\r\n]|\\[^\r\n])*\/[gp]*$/.test(program);
+import { sedProgram } from './sed-inspection.mjs';
+
+// Compatibility helper for callers that only need a read-only verdict.
+export function safeSed(program) {
+  try {
+    const { reads, writes } = sedProgram(program);
+    return !reads.length && !writes.length;
+  } catch {
+    return false;
+  }
 }
 
 export function safeMetadataFilter(source, variables) {

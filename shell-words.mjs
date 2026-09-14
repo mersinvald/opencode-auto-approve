@@ -6,7 +6,8 @@ const fail = (reason) => {
 };
 function characters(word, vars, quoted = false) {
   const result = [];
-  for (const part of word?.Parts ?? fail('unsupported_word')) {
+  for (const part of word?.Parts ??
+    (quoted && word?.Type === 'DblQuoted' ? [] : fail('unsupported_word'))) {
     if (part.Type === 'Lit') {
       const value = part.Value;
       for (let i = 0; i < value.length; i++) {
@@ -26,7 +27,7 @@ function characters(word, vars, quoted = false) {
         result.push({ c, active });
       }
     } else if (part.Type === 'SglQuoted' && !part.Dollar) {
-      for (const c of part.Value) result.push({ c, active: false });
+      for (const c of part.Value ?? '') result.push({ c, active: false });
     } else if (part.Type === 'DblQuoted' && !part.Dollar) {
       result.push(...characters(part, vars, true));
     } else if (

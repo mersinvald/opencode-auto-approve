@@ -5,8 +5,9 @@ import { canonical, digest, secretPath, policyPath, requestDirectory, within } f
 import { parseShell, attestRuntime } from './shell-host.mjs';
 import { repositoryScope } from './repository-scope.mjs';
 import { literal, expandWord, arrayExpansion } from './shell-words.mjs';
+import { sedInvocation } from './sed-inspection.mjs';
 import { sqliteRead } from './sqlite-read.mjs';
-import { safeSed, safeMetadataFilter, gitInspection } from './shell-inspection.mjs';
+import { safeMetadataFilter, gitInspection } from './shell-inspection.mjs';
 
 const fail = (reason) => {
   throw Error(reason);
@@ -236,6 +237,35 @@ export async function extractAction(request, { scope, config, runtime, permissio
           await target(a[1], state.cwd, 'list');
           return;
         }
+        if (name === 'sed') {
+          const dialect =
+            process.platform === 'darwin' && executable === '/usr/bin/sed'
+              ? 'bsd'
+              : process.platform === 'linux' || /-gnused-[^/]+\/bin\/sed$/.test(executable)
+                ? 'gnu'
+                : 'unknown';
+          const parsed = sedInvocation(args, { dialect, piped });
+          await pathArgs([...parsed.inputs, ...parsed.reads], state);
+          await pathArgs(parsed.writes, state, 'write');
+          if (parsed.inPlace) {
+            for (const file of parsed.inputs) {
+              // In-place sed replaces the directory entry. Resolving a final
+              // symlink as a normal write would authorize the wrong object.
+              const lexical = path.resolve(state.cwd, file);
+              if (!(await lstat(lexical)).isFile()) fail('sed_in_place_file');
+              await target(file, state.cwd, 'write');
+              if (parsed.suffix) {
+                const backup = lexical + parsed.suffix;
+                const st = await lstat(backup).catch((e) => {
+                  if (e.code !== 'ENOENT') throw e;
+                });
+                if (st && !st.isFile()) fail('sed_backup_file');
+                await target(backup, state.cwd, 'write');
+              }
+            }
+          }
+          return;
+        }
         if (name === 'jq') {
           const a = [...args],
             variables = new Map();
@@ -280,7 +310,6 @@ export async function extractAction(request, { scope, config, runtime, permissio
             'tail',
             'wc',
             'grep',
-            'sed',
             'ls',
             'sort',
             'shasum',
@@ -290,7 +319,7 @@ export async function extractAction(request, { scope, config, runtime, permissio
           ].includes(name)
         ) {
           let files = [],
-            pattern = !['grep', 'sed'].includes(name),
+            pattern = name !== 'grep',
             ended = false;
           for (let i = 0; i < args.length; i++) {
             const a = args[i];
@@ -305,8 +334,7 @@ export async function extractAction(request, { scope, config, runtime, permissio
                 (name === 'wc' && /^-[clmw]+$/.test(a)) ||
                 (name === 'ls' && /^-[aldh1nFpt]+$/.test(a)) ||
                 (name === 'sort' && /^-[unrf]+$/.test(a)) ||
-                (['head', 'tail'].includes(name) && /^-\d{1,6}$/.test(a)) ||
-                (name === 'sed' && a === '-n' && i === 0)
+                (['head', 'tail'].includes(name) && /^-\d{1,6}$/.test(a))
               )
                 continue;
               if (
@@ -344,7 +372,6 @@ export async function extractAction(request, { scope, config, runtime, permissio
               fail('unsupported_flags');
             }
             if (!pattern) {
-              if (name === 'sed' && !safeSed(a, args[0] === '-n')) fail('sed_program');
               pattern = true;
               continue;
             }

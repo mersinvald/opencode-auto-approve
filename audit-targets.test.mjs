@@ -167,11 +167,7 @@ test('inspection filters normalize data programs and flag arguments', async () =
   ])
     await allowed(command);
   for (const command of [
-    "sed -i '' 's/a/b/' contracts/common.json",
     "sed 's/a/b/e' contracts/common.json",
-    "sed 's/a/b/w /tmp/escape' contracts/common.json",
-    "sed 's/a/b/;w /tmp/escape' contracts/common.json",
-    "sed 'r /etc/passwd' contracts/common.json",
     'sort -o /tmp/escape contracts/common.json',
     'uniq contracts/common.json /tmp/escape',
     'find . -prune -o -exec evil {} +',
