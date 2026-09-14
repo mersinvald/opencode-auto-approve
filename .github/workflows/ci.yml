@@ -39,6 +39,8 @@ jobs:
         run: npm run build:parser
       - name: Test rules and transport
         run: npm test
+      - name: Test Python AST front end
+        run: npm run test:python
       - name: Test installer preservation
         run: npm run test:install
       - name: Test native OpenCode integration

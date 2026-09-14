@@ -49,7 +49,13 @@ Known native reads and edits map directly to grants. Unsupported native actions,
 
 An effective Always ask rule takes precedence, including for a known effect within an incomplete analysis. Static approval requires complete analysis and an allow rule for every effect. Otherwise, the model reviews the full command and available helper sources. It can save supplied atomic candidates, but it cannot save approval for unresolved command syntax.
 
-The parser can normalize literal variables, bounded arrays, paths, filters, and limited metadata substitutions. It does not execute the proposed command. Python helpers go to the model as bounded source context. General Python static analysis is not implemented.
+The shell parser can normalize literal variables, bounded arrays, paths, filters, and limited metadata substitutions. It does not execute the proposed command.
+
+A missing pytest target requires model review. It does not stop analysis of later commands or other working directories. Audit details show the missing target, working directory, and applicable `cd` outcome. The analyzer retains both outcomes of an unguarded `cd`.
+
+The model assesses effects that the parser cannot resolve. Incomplete parsing alone does not require user approval. The model must identify any effect or authority that remains unclear. Unreadable helpers, explicit restrictions, and unauthorized actions still require escalation.
+
+The optional [Python analyzer](python-parser.md) resolves bounded functions, loops, branches, file effects, and process calls. Imports have separate grants. Unknown Python effects go to the model with bounded source context.
 
 Repository, secret, policy, Beads, and test operations remain distinct. Reading `AGENTS.md` is allowed by default. A symlink to secret material still requires a secret read grant.
 

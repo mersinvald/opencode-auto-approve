@@ -107,5 +107,27 @@ class FullInstallTest(unittest.TestCase):
             self.assertFalse((root/'plugins-dev').exists())
             self.assertEqual((root/'opencode.json').read_bytes(), before)
 
+    def test_python_setup_preserves_model_permissions_and_repeat_registration(self):
+        from install import install
+        source = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            self.profile(root)
+            install(root, provider_id='custom', model_id='model', variant='medium', bin_dir=root/'bin')
+            original = json.loads((root/'approval-policy.json').read_text())
+            subprocess.run(['python3', '-I', '-S', '-B', str(source/'build_python.py'),
+                            '--config-root', str(root)], check=True, capture_output=True, text=True)
+            policy = json.loads((root/'approval-policy.json').read_text())
+            self.assertEqual({k:v for k,v in policy.items() if k not in ('staticPython','staticShell')}, original)
+            self.assertTrue(policy['staticPython']['enabled'])
+            self.assertEqual(policy['staticPython']['parser']['path'], str(root/'plugins-dev/approval-review/python-parser/parse.py'))
+            self.assertEqual(len(policy['staticPython']['environments']), 1)
+            self.assertTrue((root/'plugins-dev/approval-audit/python-effects.mjs').exists())
+            subprocess.run(['python3', '-I', '-S', '-B', str(source/'build_python.py'),
+                            '--config-root', str(root)], check=True, capture_output=True, text=True)
+            again = json.loads((root/'approval-policy.json').read_text())
+            self.assertEqual(len(again['staticPython']['environments']), 1)
+            self.assertEqual(again['model'], original['model'])
+
 if __name__ == '__main__':
     unittest.main()

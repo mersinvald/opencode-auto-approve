@@ -54,6 +54,8 @@ def main():
     subprocess.run(['go', 'mod', 'verify'], cwd=SOURCE/'shell-parser', check=True)
     subprocess.run(['go', 'build', '-mod=readonly', '-trimpath', '-o', str(binary), '.'],
                    cwd=SOURCE/'shell-parser', check=True)
+    subprocess.run([str(binary), 'posix'], input='true', text=True,
+                   stdout=subprocess.DEVNULL, check=True, timeout=10)
     if args.config_root:
         profile = json.loads(args.startup_profile.read_text()) if args.startup_profile else None
         print(json.dumps(install_parser(args.config_root, binary, profile)))

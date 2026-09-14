@@ -141,11 +141,20 @@ export async function attestRuntime(runtime, settings) {
       }
     }
   }
-  const resolveExecutable = async (name) => {
-    if (builtins.has(name)) return 'builtin:' + name;
+  return {
+    ...executableResolver(runtime.env, settings),
+    fingerprint: digest({ runtime, shellPath }),
+  };
+}
+
+export function executableResolver(environment, settings) {
+  if (Object.entries(environment).some(([k, v]) => unsafeEnvironment(k, v)))
+    throw Error('shell_environment');
+  const resolveExecutable = async (name, useBuiltins = true) => {
+    if (useBuiltins && builtins.has(name)) return { path: name, realpath: 'builtin:' + name };
     const search = name.includes('/')
       ? [name]
-      : (runtime.env.PATH ?? '').split(':').map((p) => path.join(p, name));
+      : (environment.PATH ?? '').split(':').map((p) => path.join(p, name));
     for (const candidate of search) {
       if (!path.isAbsolute(candidate)) throw Error('relative_executable');
       try {
@@ -171,7 +180,7 @@ export async function attestRuntime(runtime, settings) {
         stat.size < 256 * 1024 * 1024 &&
         sha256(await readFile(target)) === pin.sha256
       )
-        return target;
+        return { path: candidate, realpath: target };
       // A writable wrapper earlier in PATH must not be skipped to find a later
       // trusted binary. Nix store binaries are immutable and root-owned.
       if (
@@ -179,7 +188,18 @@ export async function attestRuntime(runtime, settings) {
         stat.uid !== 0 ||
         stat.mode & 0o022 ||
         !/^(\/(usr\/)?bin\/|\/nix\/store\/[^/]+\/bin\/)/.test(target) ||
-        path.basename(target) !== path.basename(name)
+        (path.basename(target) !== path.basename(name) &&
+          !(
+            ['/bin/sh', '/usr/bin/sh'].includes(candidate) &&
+            [
+              '/bin/sh',
+              '/usr/bin/sh',
+              '/bin/dash',
+              '/usr/bin/dash',
+              '/bin/bash',
+              '/usr/bin/bash',
+            ].includes(target)
+          ))
       )
         return null;
       const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -203,19 +223,25 @@ export async function attestRuntime(runtime, settings) {
       } finally {
         await file.close();
       }
-      return target;
+      return { path: candidate, realpath: target };
     }
     return null;
   };
   // Reuse verified identities only within this analysis. Revalidation hashes again.
   const verified = new Map();
   return {
-    resolveExecutable: (name) => {
-      if (!verified.has(name)) verified.set(name, resolveExecutable(name));
-      return verified.get(name);
+    resolveExecutableIdentity: (name, useBuiltins = true) => {
+      const key = JSON.stringify([name, useBuiltins]);
+      if (!verified.has(key)) verified.set(key, resolveExecutable(name, useBuiltins));
+      return verified.get(key);
     },
-    runtimeEnvironment: runtime.env,
-    fingerprint: digest({ runtime, shellPath }),
+    resolveExecutable: async (name, useBuiltins = true) => {
+      const key = JSON.stringify([name, useBuiltins]);
+      if (!verified.has(key)) verified.set(key, resolveExecutable(name, useBuiltins));
+      return (await verified.get(key))?.realpath ?? null;
+    },
+    runtimeEnvironment: environment,
+    fingerprint: digest({ environment }),
   };
 }
 

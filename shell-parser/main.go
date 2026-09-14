@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 || (os.Args[1] != "bash" && os.Args[1] != "zsh") {
+	if len(os.Args) != 2 || (os.Args[1] != "bash" && os.Args[1] != "zsh" && os.Args[1] != "posix") {
 		os.Exit(2)
 	}
 	input, err := io.ReadAll(io.LimitReader(os.Stdin, 32769))
@@ -20,6 +20,9 @@ func main() {
 		os.Exit(2)
 	}
 	dialect := syntax.LangBash
+	if len(os.Args) > 1 && os.Args[1] == "posix" {
+		dialect = syntax.LangPOSIX
+	}
 	if os.Args[1] == "zsh" {
 		dialect = syntax.LangZsh
 	}

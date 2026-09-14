@@ -43,6 +43,15 @@ def main():
             policy['staticShell'] = {**supplied['staticShell'], **policy['staticShell']}
         else:
             policy['staticShell']['zshStartup'] = supplied
+    from build_python import profile as python_profile, pin as python_pin
+    python = python_profile(sys.executable)
+    python_exe = python['interpreter']['path']
+    policy['staticPython'] = {'enabled': True, 'parser': {**python_pin(config/'review/python-parser/parse.py'),
+                            'interpreter': python['interpreter']}, 'environments': [python]}
+    policy['staticShell']['executables'].append({**python['interpreter'], 'name': Path(python_exe).name})
+    policy.setdefault('grantRules', []).extend([
+        {'operation': 'python.import', 'target': name, 'targetType': 'exact', 'mode': 'allow'}
+        for name in ['pathlib', 'subprocess']])
     (config/'policy.json').write_text(json.dumps(policy)); (config/'policy.json').chmod(0o600)
     wrapper = config/'fixture'; wrapper.mkdir()
     (wrapper/'package.json').write_text(json.dumps({'name': 'static-fixture', 'type': 'module', 'exports': './index.mjs'}))
@@ -111,6 +120,9 @@ export default {id:'local.approval-review', async setup(ctx) {
                  ('sqlite_tables','sqlite3 -safe -readonly -init /dev/null fixture.db ".tables"'),
                  ('sqlite_select',"sqlite3 -safe -readonly -init /dev/null fixture.db \"SELECT data FROM messages WHERE id='msg_one';\""),
                  ('delayed_directory',f'cd "{external}" && cat file'),
+                 ('python_functions', f"'{python_exe}' -I -S -B - <<'PY'\nfrom pathlib import Path\ndef read(name):\n    return Path(name).read_text()\nfor name in ['file']:\n    print(read(name))\nPY"),
+                 ('python_process', f"'{python_exe}' -I -S -B - <<'PY'\nimport subprocess\nsubprocess.run(['/bin/cat','file'],check=True)\nsubprocess.run('cat file | wc -l',shell=True,check=True)\nPY"),
+                 ('pytest_missing', 'cd tests\n/usr/bin/python3 -m pytest test_phase1_one.py\nprintf done'),
                  ('fallback',"if grep -q hello file; then cat file; else unmodeled_fixture; fi")]
         if policy['staticShell'].get('helpers'):
             lint = policy['staticShell']['helpers'][0]['path']
@@ -127,7 +139,7 @@ export default {id:'local.approval-review', async setup(ctx) {
                'content':[{'type':'tool','id':'call_'+name,'name':'shell','state':{'status':'completed','input':{'command':command,'workdir':str(repo)},'content':[{'type':'text','text':'Fixture source context'}]},'time':{'created':stamp,'completed':stamp}}]}]
             api.call('POST','/api/session/import',data)
             api.call('POST',f'/api/session/{sid}/permission',{'action':'execute','resources':['fixture'],'metadata':{'fixtureRun':name,'command':command}})
-            if name != 'fallback':
+            if name not in ('fallback','pytest_missing'):
                 wait(lambda:any(e['kind']=='finished' and e['name']==name for e in events()))
                 row=next(r for r in records() if r['sessionID']==sid and r['code']=='grant_rule' and r['action']=='shell')
                 assert row['details']['status']=='stored',row.get('details')
@@ -152,7 +164,13 @@ export default {id:'local.approval-review', async setup(ctx) {
                 wait(lambda:any(r['sessionID']==sid and r['code']=='model_escalation' for r in records()))
                 row=next(r for r in reversed(records()) if r['sessionID']==sid and r['code']=='model_escalation')
                 detail=json.loads((base/'audit'/row['details']['path']).read_text())
-                assert detail['data']['diagnostics']['static']['analysis']['reason']=='unverified_executable'
+                analysis=detail['data']['diagnostics']['static']['analysis']
+                assert analysis['reason']==('pytest_target_missing' if name=='pytest_missing' else 'unverified_executable')
+                if name=='pytest_missing':
+                    assert not analysis['complete']
+                    assert any(g['operation']=='tests.run' and g['target']==str(repo/'tests/test_phase1_one.py') for g in analysis['grants'])
+                    assert {c['cwd'] for c in analysis['commands'] if c['argv'][0]=='printf'}=={str(repo),str(repo/'tests')}
+                    assert analysis['unresolved'][0]['cdBranch']['outcome']=='failure'
                 assert detail['data']['lifecycle']['status']=='ask'
                 pending=api.call('GET',f'/api/session/{sid}/permission'); assert len(pending)==1
                 assert any(e['kind']=='model' for e in events())

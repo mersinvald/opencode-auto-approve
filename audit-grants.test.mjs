@@ -79,6 +79,48 @@ const record = (data, extra = {}) => ({
   detail: sanitizeAudit(data),
 });
 
+test('Python grant and unresolved source locations remain visible in detailed audit output', () => {
+  const data = {
+    grants: {
+      complete: false,
+      entries: [
+        {
+          grant: { ...read, locations: [{ source: '/fixture/helper.py', line: 7 }] },
+          mode: 'allow',
+          rule: global,
+        },
+      ],
+      unresolved: [{ reason: 'python_unknown_call', source: '/fixture/helper.py', line: 11 }],
+    },
+  };
+  const text = formatDetailedRecord(record(data));
+  assert.match(text, /Source: \/fixture\/helper.py:7/);
+  assert.match(text, /Source: \/fixture\/helper.py:11/);
+});
+
+test('missing pytest diagnostics show the target and the cwd branch', () => {
+  const snapshot = grantSnapshot({
+    analysis: {
+      complete: false,
+      grants: [],
+      commands: [{ argv: ['python3', '-m', 'pytest', 'test_one.py'], cwd: '/fixture/pwa' }],
+      unresolved: [
+        {
+          reason: 'pytest_target_missing',
+          target: '/fixture/pwa/test_one.py',
+          cwd: '/fixture/pwa',
+          cdBranch: { from: '/fixture/pwa', target: '/fixture/infra', outcome: 'failure' },
+          commandIndex: 0,
+        },
+      ],
+    },
+  });
+  const text = formatDetailedRecord(record({ grants: snapshot }));
+  assert.match(text, /Target: \/fixture\/pwa\/test_one.py/);
+  assert.match(text, /Working directory: \/fixture\/pwa/);
+  assert.match(text, /After cd failure: \/fixture\/infra/);
+});
+
 test('pretty details show exact atoms, matched scopes and incomplete coverage', () => {
   const text = formatDetailedRecord(record({ grants: grantSnapshot(checked) }));
   assert.match(text, /Incomplete analysis · 2 atomic grants/);

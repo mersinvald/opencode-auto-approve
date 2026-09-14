@@ -2,7 +2,10 @@ import path from 'node:path';
 import { lstat, readFile, realpath, readdir } from 'node:fs/promises';
 import { grant } from './grant-rules.mjs';
 import { canonical, digest, secretPath, policyPath, requestDirectory, within } from './policy.mjs';
-import { parseShell, attestRuntime } from './shell-host.mjs';
+import { parseShell, attestRuntime, executableResolver } from './shell-host.mjs';
+import { pythonInvocation } from './python-invocation.mjs';
+import { parsePythonSource, readPythonHelper, attestPythonEnvironment } from './python-host.mjs';
+import { pythonEffects } from './python-effects.mjs';
 import { repositoryScope } from './repository-scope.mjs';
 import { literal, expandWord, arrayExpansion } from './shell-words.mjs';
 import { sedInvocation } from './sed-inspection.mjs';
@@ -48,6 +51,10 @@ export async function extractAction(request, { scope, config, runtime, permissio
     commands = [],
     snapshots = [],
     globRoots = new Set();
+  const pythonUnresolved = [],
+    shellUnresolved = [];
+  let sourceLocation,
+    pythonDepth = 0;
   const constraints = {
     readOnly: !!scope.readOnly,
     beadsWriter: (config.staticShell?.beadsWriters ?? ['orchestrator']).includes(scope.agent),
@@ -64,6 +71,15 @@ export async function extractAction(request, { scope, config, runtime, permissio
   };
   const add = (op, target, type = 'file', extra) => {
     const item = grant(op, target, type, extra);
+    const locations = [
+      ...(items.get(item.id)?.locations ?? []),
+      ...(sourceLocation ? [sourceLocation] : []),
+    ];
+    if (locations.length)
+      item.locations = [...new Map(locations.map((p) => [JSON.stringify(p), p])).values()].slice(
+        0,
+        64,
+      );
     items.set(item.id, item);
     return item;
   };
@@ -203,9 +219,11 @@ export async function extractAction(request, { scope, config, runtime, permissio
         commands.push({
           argv,
           cwd: state.cwd,
+          ...(state.cdBranch ? { cdBranch: state.cdBranch } : {}),
           ...(state.environment ? { environment: state.environment } : {}),
         });
-        const executable = await host.resolveExecutable(argv[0]);
+        const commandHost = state.commandHost ?? host;
+        const executable = await commandHost.resolveExecutable(argv[0], !state.directProcess);
         if (!executable) fail('unverified_executable');
         if (!executable.startsWith('builtin:')) authority.add(executable);
         if (['true', 'false', 'pwd'].includes(name) && !args.length) return;
@@ -746,6 +764,220 @@ export async function extractAction(request, { scope, config, runtime, permissio
           return category === 'beads.read' && a.includes('--json') ? 'json' : undefined;
         }
         if (/^python(?:3(?:\.\d+)?)?$/.test(name)) {
+          const decodedPython = pythonInvocation(argv, {
+            cwd: state.cwd,
+            stdin: state.inputSource,
+          });
+          const pinnedPythonHelper =
+            decodedPython.source?.kind === 'file' &&
+            config.staticShell?.helpers?.some((p) => p.path === decodedPython.source.path);
+          const legacyModuleArgs = args.filter(
+            (value, index) => index >= args.findIndex((x) => !/^-[ISB]+$/.test(x)),
+          );
+          const knownPytest = legacyModuleArgs[0] === '-m' && legacyModuleArgs[1] === 'pytest';
+          if (config.staticPython?.enabled && !knownPytest && !pinnedPythonHelper) {
+            if (++pythonDepth > 4) fail('python_recursion_limit');
+            const previousLocation = sourceLocation;
+            const unresolved = (reason, extra = {}) => {
+              complete = false;
+              pythonUnresolved.push({ reason, ...extra, commandIndex: commands.length - 1 });
+            };
+            try {
+              const identity = await commandHost.resolveExecutableIdentity(
+                argv[0],
+                !state.directProcess,
+              );
+              let stdin = state.inputSource;
+              if (
+                stdin === undefined &&
+                state.inputFile &&
+                decodedPython.reason === 'python_stdin_unresolved'
+              ) {
+                if (!state.inputFileFresh) fail('python_stdin_file_position');
+                const helper = await readPythonHelper(state.inputFile);
+                stdin = helper.body;
+                authority.add(state.inputFile);
+                snapshots.push({ pythonSource: state.inputFile, ...helper, body: undefined });
+              }
+              const invocation = pythonInvocation(argv, { cwd: state.cwd, stdin });
+              if (invocation.startup?.required) {
+                const entry = identity.path;
+                const registered = config.staticPython.environments?.find(
+                  (p) => p.interpreter.path === entry,
+                );
+                add(
+                  'python.startup',
+                  registered?.prefix ?? path.dirname(path.dirname(entry)),
+                  'exact',
+                );
+              }
+              if (!invocation.complete) {
+                unresolved(invocation.reason);
+                return;
+              }
+              let body = invocation.source.text,
+                scriptPath;
+              if (invocation.source.kind === 'file') {
+                scriptPath = await target(invocation.source.path, state.cwd);
+                if ([...changed.keys()].some((p) => within(scriptPath, p) || within(p, scriptPath)))
+                  fail('python_helper_modified');
+                const helper = await readPythonHelper(scriptPath);
+                body = helper.body;
+                authority.add(scriptPath);
+                snapshots.push({ pythonSource: scriptPath, ...helper, body: undefined });
+              }
+              let profile;
+              try {
+                profile = await attestPythonEnvironment(
+                  identity,
+                  invocation,
+                  config.staticPython,
+                  signal,
+                );
+              } catch (e) {
+                unresolved(e.message);
+              }
+              if (profile) {
+                for (const pin of profile.files) {
+                  authority.add(pin.path);
+                  authority.add(pin.realpath);
+                }
+                for (const directory of profile.directories) globRoots.add(directory.realpath);
+                snapshots.push({
+                  pythonEnvironment: profile.interpreter.path,
+                  prefix: profile.prefix,
+                  version: profile.version,
+                  fingerprint: digest(profile),
+                });
+              }
+              const parserConfig = {
+                ...config.staticPython.parser,
+                ...(profile ? { interpreter: profile.interpreter } : {}),
+              };
+              const parserProfile =
+                profile ??
+                (await attestPythonEnvironment(
+                  {
+                    path: parserConfig.interpreter.path,
+                    realpath: parserConfig.interpreter.realpath,
+                  },
+                  { isolation: { isolated: true, noSite: true, noBytecode: true } },
+                  config.staticPython,
+                  signal,
+                ));
+              for (const pin of parserProfile.files) {
+                authority.add(pin.path);
+                authority.add(pin.realpath);
+              }
+              for (const directory of parserProfile.directories) globRoots.add(directory.realpath);
+              authority.add(parserConfig.path);
+              const parsed = await parsePythonSource(body, parserConfig, signal);
+              if (parsed.status !== 'parsed') {
+                unresolved(parsed.reason);
+                return;
+              }
+              if (profile && JSON.stringify(parsed.grammar) !== JSON.stringify(profile.version))
+                unresolved('python_grammar_mismatch');
+              snapshots.push({
+                pythonSource: scriptPath ?? '<inline>',
+                sha256: parsed.sourceSha256,
+              });
+              const effects = pythonEffects(parsed.ast, {
+                cwd: state.cwd,
+                scriptPath,
+                source: scriptPath ?? '<inline>',
+                argv: invocation.argv,
+              });
+              for (const issue of effects.unresolved) unresolved(issue.reason, issue);
+              for (const effect of effects.effects) {
+                sourceLocation = {
+                  source: effect.source,
+                  line: effect.line,
+                  column: effect.column,
+                  endLine: effect.endLine,
+                };
+                try {
+                  if (effect.kind === 'import') {
+                    if (effect.module !== 'os' && !effect.module?.startsWith('os.'))
+                      add('python.import', effect.module ?? '<relative>', 'exact');
+                    if (!profile?.modules?.[effect.module] || effect.level)
+                      unresolved('python_import_unverified', sourceLocation);
+                  } else if (effect.kind === 'file') {
+                    if (
+                      effect.operation === 'files.delete' &&
+                      (
+                        await lstat(effect.target).catch((e) => {
+                          if (e.code !== 'ENOENT') throw e;
+                        })
+                      )?.isSymbolicLink()
+                    )
+                      unresolved('python_unlink_symlink', sourceLocation);
+                    await target(
+                      effect.target,
+                      state.cwd,
+                      effect.operation.slice('files.'.length),
+                      effect.targetType,
+                    );
+                  } else if (effect.kind === 'command') {
+                    const environment = effect.environment
+                      ? { ...effect.environment }
+                      : {
+                          ...commandHost.runtimeEnvironment,
+                          ...state.environment,
+                        };
+                    if (!Object.hasOwn(environment, 'PATH')) {
+                      if (effect.shell || !profile?.defaultPath)
+                        fail('python_default_path_unverified');
+                      environment.PATH = profile.defaultPath;
+                    }
+                    const childHost = executableResolver(environment, config.staticShell);
+                    const childState = {
+                      cwd: effect.cwd,
+                      vars: {},
+                      arrays: {},
+                      jsonFiles: {},
+                      commandHost: childHost,
+                      environment: effect.environment ?? state.environment,
+                      inputSource: typeof effect.input === 'string' ? effect.input : undefined,
+                      inputFile: effect.stdio.stdin?.file,
+                      directProcess: !effect.shell,
+                    };
+                    if (effect.shell) {
+                      const sh = await childHost.resolveExecutable('/bin/sh', false);
+                      if (!sh) fail('python_child_shell_unverified');
+                      authority.add(sh);
+                      const childAst = await parseShell(
+                        effect.command,
+                        config.staticShell,
+                        'posix',
+                        signal,
+                      );
+                      await sequence(
+                        childAst.Stmts,
+                        [childState],
+                        !!effect.stdio.stdin || effect.input !== undefined,
+                      );
+                    } else {
+                      const childArgv = [...effect.argv];
+                      if (childArgv[0].includes('/') && !path.isAbsolute(childArgv[0]))
+                        childArgv[0] = path.resolve(effect.cwd, childArgv[0]);
+                      await exec(
+                        childArgv,
+                        childState,
+                        !!effect.stdio.stdin || effect.input !== undefined,
+                      );
+                    }
+                  }
+                } catch (e) {
+                  unresolved(e.message, sourceLocation);
+                }
+              }
+              return;
+            } finally {
+              pythonDepth--;
+              sourceLocation = previousLocation;
+            }
+          }
           const a = [...args],
             flags = [];
           while (/^-[ISB]+$/.test(a[0] ?? '')) flags.push(a.shift());
@@ -783,12 +1015,31 @@ export async function extractAction(request, { scope, config, runtime, permissio
               tests.push(file);
             }
             if (!tests.length) fail('pytest_targets');
-            for (const file of tests)
-              add('tests.run', file, (await lstat(file)).isDirectory() ? 'directory' : 'file', {
+            for (const file of tests) {
+              let stat;
+              try {
+                stat = await lstat(file);
+              } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+                // The runner may load configuration before rejecting this
+                // selection. Require review, but retain subsequent commands
+                // and the other cwd branch instead of aborting analysis.
+                complete = false;
+                shellUnresolved.push({
+                  reason: 'pytest_target_missing',
+                  message: `Test target is absent in this execution context: ${file}`,
+                  target: file,
+                  cwd: state.cwd,
+                  ...(state.cdBranch ? { cdBranch: state.cdBranch } : {}),
+                  commandIndex: commands.length - 1,
+                });
+              }
+              add('tests.run', file, stat?.isDirectory() ? 'directory' : 'file', {
                 runner: executable,
                 description:
                   'Execute test code and its configuration in this checkout. Tests may have side effects.',
               });
+            }
             return;
           }
           const name = a.shift(),
@@ -848,6 +1099,9 @@ export async function extractAction(request, { scope, config, runtime, permissio
           ...s,
           jsonFiles: { ...s.jsonFiles },
           inputKind: undefined,
+          inputSource: undefined,
+          inputFile: undefined,
+          inputFileFresh: undefined,
           outputKind: undefined,
           outputPath: undefined,
         }));
@@ -866,10 +1120,13 @@ export async function extractAction(request, { scope, config, runtime, permissio
             r.Word?.Parts?.length === 1 &&
             r.Word.Parts[0].Type === 'SglQuoted'
           ) {
-            const body = r.Hdoc.Parts?.every((p) => p.Type === 'Lit')
-              ? r.Hdoc.Parts.map((p) => p.Value).join('')
-              : '';
-            for (const state of states) state.inputKind = jsonKind(body);
+            const body = (r.Hdoc.Parts ?? []).every((p) => p.Type === 'Lit')
+              ? (r.Hdoc.Parts ?? []).map((p) => p.Value ?? '').join('')
+              : undefined;
+            for (const state of states) {
+              state.inputKind = jsonKind(body);
+              state.inputSource = body;
+            }
             piped = true;
             continue;
           }
@@ -909,6 +1166,10 @@ export async function extractAction(request, { scope, config, runtime, permissio
               continue;
             }
             const resolved = await target(file, state.cwd, r.Op === '<' ? 'read' : 'write');
+            if (r.Op === '<') {
+              state.inputFile = resolved;
+              state.inputFileFresh = true;
+            }
             if (r.Op !== '<') {
               for (const key of Object.keys(state.jsonFiles))
                 if (within(key, resolved) || within(resolved, key)) delete state.jsonFiles[key];
@@ -1040,8 +1301,14 @@ export async function extractAction(request, { scope, config, runtime, permissio
               if (piped || argv.length !== 2 || argv[1].startsWith('-')) fail('cd_options');
               const next = await target(argv[1], state.cwd, 'access');
               if (next !== path.resolve(state.cwd, argv[1])) fail('logical_cwd');
-              out.push({ ...state, exit: false });
-              state = { ...state, cwd: next, exit: true };
+              const cdBranch = { line: stmt.Pos?.Line, from: state.cwd, target: next };
+              out.push({ ...state, exit: false, cdBranch: { ...cdBranch, outcome: 'failure' } });
+              state = {
+                ...state,
+                cwd: next,
+                exit: true,
+                cdBranch: { ...cdBranch, outcome: 'success' },
+              };
             } else {
               state.outputKind = await exec(
                 argv,
@@ -1062,7 +1329,15 @@ export async function extractAction(request, { scope, config, runtime, permissio
           } else if (!stmt.Redirs?.length) state.exit = true;
           out.push(state);
         }
-        return [...new Map(out.map((s) => [digest(s), s])).values()];
+        // Diagnostic provenance must not change which execution states merge.
+        return [
+          ...new Map(
+            out.map((s) => {
+              const { cdBranch, ...execution } = s;
+              return [digest(execution), s];
+            }),
+          ).values(),
+        ];
       };
       await sequence(ast.Stmts, [{ cwd, vars: {}, arrays: {}, jsonFiles: {} }]);
       const writes = [...items.values()].filter((g) => /\.(write|delete)$/.test(g.operation));
@@ -1113,10 +1388,16 @@ export async function extractAction(request, { scope, config, runtime, permissio
   }
   return {
     complete,
-    reason,
+    reason: reason ?? shellUnresolved[0]?.reason ?? pythonUnresolved[0]?.reason,
     unresolved: complete
       ? []
-      : [{ reason, commandIndex: commands.length ? commands.length - 1 : null }],
+      : [
+          ...pythonUnresolved,
+          ...shellUnresolved,
+          ...(reason
+            ? [{ reason, commandIndex: commands.length ? commands.length - 1 : null }]
+            : []),
+        ],
     constraints,
     grants: [...items.values()],
     commands,

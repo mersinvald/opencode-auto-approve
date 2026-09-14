@@ -7,12 +7,15 @@ npm ci
 npm run build:parser
 npm run check
 npm test
+npm run test:python
 npm run test:install
 npm run test:native
 npm run test:tui
 ```
 
 The Node tests exercise rule precedence, scope migration, parser boundaries, audit handling, transport validation, and asynchronous races.
+
+The Python tests use an isolated AST driver. They verify source locations, literal precision, resource limits, and parsing without source execution. See the [Python analyzer scope](python-parser.md) for its current limits.
 
 Native tests start OpenCode 2.0.2 from the pinned development dependency. They create isolated profiles, repositories, credentials, and loopback services. The tests do not open your sessions or invoke a real model.
 

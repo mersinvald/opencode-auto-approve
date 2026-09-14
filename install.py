@@ -20,6 +20,14 @@ def link_runtime(destination):
         target.symlink_to(modules, target_is_directory=True)
 
 PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-review.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-storage.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'package.json']
+PYTHON_FILES = ['python-host.mjs', 'python-effects.mjs', 'python-invocation.mjs']
+PLUGIN_FILES += PYTHON_FILES
+
+def copy_python(destination):
+    for name in PYTHON_FILES:
+        shutil.copy2(SOURCE/name, destination/name)
+    (destination/'python-parser').mkdir(exist_ok=True)
+    shutil.copy2(SOURCE/'python-parser/parse.py', destination/'python-parser/parse.py')
 
 def private_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +71,7 @@ def install_audit_viewer(root, bin_dir=None):
     for name in ['audit.mjs', 'audit-detail.mjs', 'audit-grants.mjs', 'audit-view.mjs', 'audit-terminal.mjs', 'policy.mjs', 'shell-context.mjs', 'audit-storage.mjs', 'repository-scope.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sed-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'grant-tree-tui.mjs', 'approval-notifications.mjs']:
         shutil.copy2(SOURCE/name, destination/name)
     shutil.copy2(SOURCE/'audit-tui.mjs', destination/'tui.mjs')
+    copy_python(destination)
     (destination/'index.mjs').write_text("export { default } from './tui.mjs';\n")
     private_json(destination/'package.json', {
         'name': 'opencode-auto-approve-audit', 'version': json.loads((SOURCE/'package.json').read_text())['version'], 'type': 'module',
@@ -158,6 +167,7 @@ def install(root, mode=None, *, provider_id=None, model_id=None, variant=None,
     link_runtime(destination)
     for name in PLUGIN_FILES:
         shutil.copy2(SOURCE/name, destination/name)
+    copy_python(destination)
     private_json(policy_file, policy)
     # These native gates remain when the classifier plugin is unavailable.
     gates = [{'action': 'shell', 'resource': '*', 'effect': 'ask'}]

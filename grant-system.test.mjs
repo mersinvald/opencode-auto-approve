@@ -731,6 +731,85 @@ test('native glob pattern maps to its directory rather than a literal pattern pa
   };
   assert.equal((await gate(unsafe, p)).decision, 'dynamic');
 });
+
+test('missing pytest targets retain both cd branches, following effects, and model fallback', async () => {
+  const component = worktree + '/services/finance/accountant';
+  await mkdir(component + '/branch-tests', { recursive: true });
+  await writeFile(component + '/branch-tests/test_one.py', '# fixture, never executed');
+  const r = shell(
+    'cd services/finance/accountant\n/usr/bin/python3 -m pytest branch-tests/test_one.py\nprintf result > result.txt',
+  );
+  const args = {
+    scope,
+    config,
+    runtime: host(r),
+    permissions,
+    state: { rules: [rule('files.*', worktree), rule('tests.run', worktree)] },
+  };
+  const result = await gate(r, args),
+    a = result.analysis;
+  assert.equal(a.complete, false);
+  assert.equal(
+    result.decision,
+    'dynamic',
+    'incomplete analysis must never inherit blanket approval',
+  );
+  assert.equal(a.reason, 'pytest_target_missing');
+  const missing = a.unresolved.find((u) => u.reason === 'pytest_target_missing');
+  assert.equal(missing.cwd, worktree);
+  assert.equal(missing.target, worktree + '/branch-tests/test_one.py');
+  assert.equal(missing.cdBranch.outcome, 'failure');
+  for (const cwd of [worktree, component]) {
+    assert.ok(
+      a.grants.some(
+        (g) => g.operation === 'tests.run' && g.target === cwd + '/branch-tests/test_one.py',
+      ),
+    );
+    assert.ok(
+      a.grants.some((g) => g.operation === 'files.write' && g.target === cwd + '/result.txt'),
+    );
+    assert.ok(a.commands.some((c) => c.argv[0] === 'printf' && c.cwd === cwd));
+  }
+  for (const cwd of [worktree, component]) {
+    const ask = await gate(r, {
+      ...args,
+      state: {
+        rules: [...args.state.rules, rule('files.write', cwd + '/result.txt', 'ask', 'file')],
+      },
+    });
+    assert.equal(ask.decision, 'ask', 'known Always ask must win on either branch');
+  }
+  const guarded = shell(
+    'cd services/finance/accountant && /usr/bin/python3 -m pytest branch-tests/test_one.py',
+  );
+  const safe = await gate(guarded, { ...args, runtime: host(guarded) });
+  assert.equal(safe.analysis.complete, true);
+  assert.equal(safe.decision, 'allow');
+  assert.equal(safe.analysis.commands.filter((c) => c.argv[0] === '/usr/bin/python3').length, 1);
+});
+
+test('a missing target with an explicit working directory remains incomplete', async () => {
+  const r = shell('/usr/bin/python3 -m pytest absent-test.py; cat README.md');
+  const a = await extractAction(r, { scope, config, runtime: host(r) });
+  assert.equal(a.complete, false);
+  assert.equal(a.reason, 'pytest_target_missing');
+  assert.ok(
+    a.grants.some((g) => g.operation === 'tests.run' && g.target === worktree + '/absent-test.py'),
+  );
+  assert.ok(
+    a.grants.some((g) => g.operation === 'files.read' && g.target === worktree + '/README.md'),
+  );
+});
+
+test('cd diagnostics do not prevent equivalent execution states from merging', async () => {
+  const r = shell(Array(12).fill(`cd ${worktree}/services`).join('\n') + '\ncat file.py');
+  const a = await extractAction(r, { scope, config, runtime: host(r) });
+  assert.equal(a.complete, true, a.reason);
+  assert.deepEqual(
+    new Set(a.commands.map((c) => c.cwd)),
+    new Set([worktree, worktree + '/services']),
+  );
+});
 test('native grep binds the actual file or search directory, never the regex', async () => {
   await writeFile(base + '/.env', 'fixture only');
   await symlink(base + '/.env', repo + '/grep-link');

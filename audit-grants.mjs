@@ -19,6 +19,7 @@ export const entrySnapshots = (entries) =>
         repositoryName: grant.repositoryName,
         physicalTarget: grant.physicalTarget,
         binding: grant.binding,
+        ...(grant.locations?.length ? { locations: grant.locations } : {}),
       },
       mode,
       rule: ruleSnapshot(rule),

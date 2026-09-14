@@ -160,6 +160,7 @@ export function detailPayload({
       protectedRoots: config.protectedRoots,
       skillRoots: config.skillRoots,
       staticShell: config.staticShell,
+      staticPython: config.staticPython,
     },
     staticAnalysis: result.staticAnalysis ?? request.staticAnalysis,
   });

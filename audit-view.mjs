@@ -327,6 +327,11 @@ export function formatDetailedRecord(record, options) {
     const label = modeName(e.mode).padEnd(13);
     atom(e.grant, label + '  ', grantTone(e.mode));
     via(e.rule);
+    for (const location of objects(e.grant?.locations).slice(0, 3))
+      ui.line(
+        `Source: ${shorten(location.source)}${Number.isInteger(location.line) ? ':' + location.line : ''}`,
+        { indent: 6, tone: 'dim' },
+      );
   };
   const date = new Date(record.time),
     stamp = Number.isNaN(date.valueOf())
@@ -413,6 +418,18 @@ export function formatDetailedRecord(record, options) {
           `${safeText(u.reason ?? snapshot.reason ?? 'not recorded', 600)}${Number.isInteger(u.commandIndex) ? ' · command ' + (u.commandIndex + 1) : ''}`,
           { indent: 4, tone: 'amber' },
         );
+        if (u.source)
+          ui.line(`Source: ${shorten(u.source)}${Number.isInteger(u.line) ? ':' + u.line : ''}`, {
+            indent: 6,
+            tone: 'dim',
+          });
+        if (u.target) ui.line(`Target: ${shorten(u.target)}`, { indent: 6, tone: 'dim' });
+        if (u.cwd) ui.line(`Working directory: ${shorten(u.cwd)}`, { indent: 6, tone: 'dim' });
+        if (u.cdBranch?.target && ['success', 'failure'].includes(u.cdBranch.outcome))
+          ui.line(`After cd ${u.cdBranch.outcome}: ${shorten(u.cdBranch.target)}`, {
+            indent: 6,
+            tone: 'dim',
+          });
         if (u.command?.argv)
           ui.line(
             shorten(
