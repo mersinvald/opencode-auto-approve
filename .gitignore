@@ -1,0 +1,10 @@
+node_modules/
+bin/
+__pycache__/
+*.pyc
+*.tgz
+coverage/
+test-results/
+.env
+.env.*
+!.env.example

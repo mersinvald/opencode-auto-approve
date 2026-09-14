@@ -1,0 +1,54 @@
+{
+  "name": "opencode-auto-approve",
+  "version": "1.0.0",
+  "description": "Model-assisted, scoped permission review for OpenCode 2.",
+  "type": "module",
+  "exports": "./index.mjs",
+  "license": "MIT",
+  "author": "mersinvald",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mersinvald/opencode-auto-approve.git"
+  },
+  "bugs": "https://github.com/mersinvald/opencode-auto-approve/issues",
+  "homepage": "https://github.com/mersinvald/opencode-auto-approve#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "*.mjs",
+    "!*.test.mjs",
+    "!evaluate_grant_model.mjs",
+    "install.py",
+    "build_static.py",
+    "shell-parser/*.go",
+    "shell-parser/go.mod",
+    "shell-parser/go.sum",
+    "shell-parser/LICENSE.mvdan-sh",
+    "docs",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "build:parser": "python3 build_static.py",
+    "test": "node --test *.test.mjs",
+    "test:install": "python3 -m unittest test_install.py",
+    "test:native": "python3 run_native_tests.py",
+    "test:tui": "python3 test_grant_tui.py",
+    "test:model": "node evaluate_grant_model.mjs",
+    "check": "prettier --check \"*.mjs\" \"*.json\" \"docs/*.md\" \"*.md\" \".github/workflows/*.yml\"",
+    "format": "prettier --write \"*.mjs\" \"*.json\" \"docs/*.md\" \"*.md\" \".github/workflows/*.yml\""
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "2.0.2"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.2",
+    "@opencode/cli": "2.0.2",
+    "@opencode/theme": "2.0.2",
+    "@opentui/core": "0.5.10",
+    "@opentui/solid": "0.5.10",
+    "solid-js": "1.9.12",
+    "prettier": "3.6.2"
+  }
+}

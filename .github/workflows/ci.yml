@@ -1,0 +1,62 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: approval-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    if: github.repository == 'mersinvald/opencode-auto-approve' && github.ref == 'refs/heads/main'
+    runs-on: opencode-auto-approve
+    timeout-minutes: 20
+    steps:
+      - name: Check out trusted source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: shell-parser/go.mod
+          cache: false
+      - name: Install locked dependencies
+        run: npm ci --no-fund --no-audit
+      - name: Check formatting
+        run: npm run check
+      - name: Build the shell parser
+        run: npm run build:parser
+      - name: Test rules and transport
+        run: npm test
+      - name: Test installer preservation
+        run: npm run test:install
+      - name: Test native OpenCode integration
+        run: npm run test:native
+      - name: Test native grant tree
+        run: npm run test:tui
+      - name: Test model decisions with synthetic inputs
+        env:
+          APPROVAL_MODEL_BASE_URL: ${{ vars.APPROVAL_MODEL_BASE_URL }}
+          APPROVAL_MODEL_ID: ${{ vars.APPROVAL_MODEL_ID }}
+          APPROVAL_MODEL_REASONING: ${{ vars.APPROVAL_MODEL_REASONING }}
+          APPROVAL_MODEL_API_KEY: ${{ secrets.APPROVAL_MODEL_API_KEY }}
+        run: npm run test:model
+      - name: Upload synthetic model results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: model-contract-results
+          path: test-results/model.json
+          if-no-files-found: ignore
+          retention-days: 7
