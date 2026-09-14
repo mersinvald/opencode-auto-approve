@@ -2,17 +2,19 @@
 
 Spend less time approving routine reads and edits. Keep control over what your agent can change.
 
-OpenCode Auto Approve handles permission requests while your agent works. Saved rules cover familiar operations. A review model uses your task context to decide what needs your attention.
+OpenCode Auto Approve answers routine permission requests for you. It uses saved rules and an AI model to check actions against your instructions.
 
-For **OpenCode 2.0.2** on **macOS and Linux**. Choose your own review model through an OpenAI-compatible endpoint.
+For **OpenCode 2.0.2** on **macOS and Linux**. Choose the AI model for permission checks through an OpenAI-compatible endpoint.
 
 [Get started](#get-started) · [Project grants](#set-permissions-that-fit-your-project) · [Audit trail](#see-why-the-plugin-approved-an-action)
 
-## Stay in control during model review
+## Automatic approvals for routine work
 
-Recognized reads, searches, and read-only Git commands can pass without a model call when their scopes have permission. For other requests, the model reviews the action in the background.
+When an action needs permission, the plugin first checks your saved rules. Recognized reads, searches, and read-only Git commands can pass immediately when those rules permit them.
 
-Your usual approval dialog stays available during review. You can answer immediately, or let the model finish. An automatic approval clears the dialog and lets the agent continue. Your response takes precedence over a pending model response.
+For requests that the rules leave undecided, a separate AI model checks the proposed action against your task instructions. It can approve the request or explain why it needs your decision.
+
+You can still choose **Allow once** or **Reject** in the approval dialog while this check runs. If the model approves before you answer, the dialog closes and your agent continues. If you answer first, your decision takes precedence.
 
 ![OpenCode permission dialog with a background review in progress and Allow once and Reject controls](docs/images/approval-review.png)
 
@@ -32,7 +34,7 @@ The model may remember deployment or other consequential operations only when yo
 
 Press **Ctrl+G** or run **`/approval-grants`** to open the project grant tree. It shows observed operations, their target paths, and the rules that apply.
 
-![Grant tree: source edits allowed, payment changes require approval, and documentation uses model review](docs/images/project-grants.png)
+![Grant tree: source edits allowed, payment changes require approval, and documentation needs an AI decision](docs/images/project-grants.png)
 
 Each grant has one of three modes:
 
@@ -72,7 +74,7 @@ On macOS, notifications alert you when review escalates, fails, or remains pendi
 
 The plugin starts with rules for project reads, read-only Git inspection, `AGENTS.md`, skill reads, task scratch files, and agent coordination. Targets follow the current session and your configured directories.
 
-The installer includes these rules automatically. Project edits, test execution, and Beads updates use model review until you or the model save suitable permissions.
+The installer includes these rules automatically. Project edits, test execution, and Beads updates need an AI decision until you or the model save suitable permissions.
 
 See the [starter rule catalog](docs/starter-rules.md) for defaults, optional JSON examples, and local shell setup requirements.
 
@@ -88,7 +90,7 @@ Requirements: **OpenCode 2.0.2**, Node.js 22+, Python 3.10+, and Go 1.26+. OpenC
    npm ci
    ```
 
-2. Add a review model to your OpenCode profile using the [provider example](docs/configuration.md#classifier-provider).
+2. Add an AI model for permission checks to your OpenCode profile using the [provider example](docs/configuration.md#classifier-provider).
 
    The endpoint must support Chat Completions, tool calls, and the configured reasoning variant.
    The example uses `review`, `classifier`, and `medium` as the identifiers for the next step.
