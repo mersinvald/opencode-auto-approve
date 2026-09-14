@@ -1,5 +1,6 @@
+import { terminalLayout } from './audit-terminal.mjs';
 import { grantSnapshot } from './audit-grants.mjs';
-import { grantLabel, modeLabels } from './grant-rules.mjs';
+import { modeLabels } from './grant-rules.mjs';
 import { open, readdir, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
@@ -201,7 +202,7 @@ export async function readAudit(
   return { records: records.reverse(), skipped, limited };
 }
 
-export function formatRecord(record) {
+export function formatRecord(record, options) {
   const date = new Date(record.time);
   const time = Number.isNaN(date.valueOf()) ? record.time : date.toLocaleString();
   const label =
@@ -232,6 +233,11 @@ export function formatRecord(record) {
   lines.push(
     `  ${origin} · ${record.code}${record.stage ? ` · stage: ${record.stage}` : ''} · ${record.elapsedMs ?? '?'}ms · ${record.sessionID}`,
   );
+  if (options) {
+    const { paint } = terminalLayout(options);
+    lines[0] = paint(lines[0], eventTone(record));
+    lines[lines.length - 1] = paint(lines.at(-1), 'dim');
+  }
   return lines.join('\n');
 }
 
@@ -239,97 +245,250 @@ const array = (value) => (Array.isArray(value) ? value : []);
 const objects = (value) => array(value).filter((x) => x && typeof x === 'object');
 const modeName = (value) =>
   Object.hasOwn(modeLabels, value) ? modeLabels[value] : 'State not recorded';
-const atomLabel = (g) =>
-  `${safeText(g?.operation, 160)}  ${safeText(g?.target ? (g.space && typeof g.space.repository === 'string' ? grantLabel(g) : g.target) : '[target not recorded]', 1200)} (${safeText(g?.targetType, 20)})`;
-const ruleLabel = (r) =>
-  r
-    ? `${safeText(r.authority ?? 'unknown', 40)}/${safeText(r.scope ?? 'unknown', 40)} · ${atomLabel(r)}${r.source ? ' · ' + safeText(r.source, 100) : ''}`
-    : 'no matching rule';
+const shortSession = (id) =>
+  safeText(id, 160).length > 16 ? '…' + safeText(id, 160).slice(-12) : safeText(id);
+const eventTone = (record) =>
+  ({ allow: 'green', deny: 'red', ask: 'amber' })[record.applied] ?? 'cyan';
+const grantTone = (mode) => ({ allow: 'green', ask: 'amber', dynamic: 'cyan' })[mode];
 
-export function formatDetailedRecord(record) {
-  const lines = [formatRecord(record)],
+export function formatDetailedRecord(record, options) {
+  const ui = terminalLayout(options),
     data = record.detail?.data;
-  if (!data) {
-    lines.push(
-      `  Grant details unavailable: ${safeText(record.detailError ?? record.details?.code ?? 'not stored for this event')}`,
-    );
-    return lines.join('\n');
+  const snapshot = data?.grants ?? grantSnapshot(data?.diagnostics?.static);
+  const entries = objects(snapshot?.entries),
+    update = data?.lifecycle?.ruleUpdate;
+  const aliases = [],
+    repositories = new Map();
+  const grants = [...entries, ...objects(update?.after)].map((e) => e.grant).filter(Boolean);
+  for (const g of [
+    ...grants,
+    ...objects(update?.changes)
+      .map((c) => c.after)
+      .filter(Boolean),
+  ]) {
+    const id = g.space?.repository;
+    if (typeof id !== 'string' || repositories.has(id)) continue;
+    const base =
+      safeText(g.repositoryName ?? id.slice(0, 8), 30).replace(/[^a-zA-Z0-9_.-]/g, '_') ||
+      'repository';
+    let name = base,
+      n = 2;
+    while ([...repositories.values()].includes(name)) name = base + '-' + n++;
+    repositories.set(id, name);
   }
-  const snapshot = data.grants ?? grantSnapshot(data.diagnostics?.static);
-  if (snapshot) {
-    const entries = objects(snapshot.entries);
-    lines.push(
-      `  Analysis: ${snapshot.complete === true ? 'complete' : snapshot.complete === false ? 'incomplete' : 'coverage not recorded'} · ${entries.length} atomic grant${entries.length === 1 ? '' : 's'}`,
-    );
-    if (snapshot.restriction) lines.push('    Restriction: ' + safeText(snapshot.restriction, 800));
-    lines.push('  Grants at decision:');
-    if (!entries.length) lines.push('    No atomic grants identified.');
-    for (const e of entries) {
-      lines.push(`    ${modeName(e.mode)} · ${atomLabel(e.grant)}`);
-      lines.push('      via ' + ruleLabel(e.rule));
-      if (e.grant?.physicalTarget)
-        lines.push('      resolved: ' + safeText(e.grant.physicalTarget, 1200));
-      if (e.grant?.space?.repository)
-        lines.push('      repository: ' + safeText(e.grant.space.repository, 64));
+  for (const g of grants) {
+    const root = g?.binding?.root;
+    if (typeof root !== 'string' || !path.isAbsolute(root) || aliases.some((a) => a.root === root))
+      continue;
+    const name =
+      safeText(repositories.get(g.space?.repository) ?? g.repositoryName ?? 'worktree', 30).replace(
+        /[^a-zA-Z0-9_.-]/g,
+        '_',
+      ) || 'worktree';
+    let alias = '@' + name,
+      n = 2;
+    while (aliases.some((a) => a.alias === alias)) alias = '@' + name + '-' + n++;
+    aliases.push({ root, alias, repository: g.space?.repository });
+  }
+  const shorten = (value) => {
+    let text = safeText(value, 12000);
+    for (const a of [...aliases].sort((x, y) => y.root.length - x.root.length)) {
+      // Keep sibling paths distinct. This substitution is display-only.
+      text = text.replaceAll(a.root + '/', a.alias + '/');
+      if (text === a.root) text = a.alias;
     }
-    const unresolved = objects(snapshot.unresolved);
-    if (unresolved.length) {
-      lines.push('  Unresolved effects (require review):');
-      for (const u of unresolved) {
-        lines.push(
-          `    ${safeText(u.reason ?? snapshot.reason ?? 'not recorded', 600)}${Number.isInteger(u.commandIndex) ? ' · command ' + (u.commandIndex + 1) : ''}`,
+    const home = os.homedir();
+    return text.replaceAll(home + '/', '~/');
+  };
+  const target = (g) => {
+    if (!g?.target) return '[target not recorded]';
+    if (g.space && typeof g.space.repository === 'string') {
+      const name =
+        repositories.get(g.space.repository) ??
+        safeText(g.repositoryName ?? g.space.repository.slice(0, 8), 50);
+      return `${name}:scratch/${g.target === '.' ? '' : safeText(g.target, 4000)}${g.targetType === 'directory' && g.target !== '.' ? '/' : ''}`;
+    }
+    return shorten(g.target) + (g.targetType === 'directory' && !g.target.endsWith('/') ? '/' : '');
+  };
+  const atom = (g, prefix = '', tone) => {
+    ui.line(`${safeText(g?.operation, 160)}  ${target(g)}`, { indent: 4, prefix, tone });
+  };
+  const via = (r) => {
+    if (!r) {
+      ui.line('No matching rule', { indent: 6, tone: 'dim' });
+      return;
+    }
+    ui.line(
+      `Rule: ${safeText(r.authority ?? 'unknown')}/${safeText(r.scope ?? 'unknown')} · ${safeText(r.operation)} · ${target(r)}`,
+      { indent: 6, tone: 'dim' },
+    );
+  };
+  const state = (e) => {
+    const label = modeName(e.mode).padEnd(13);
+    atom(e.grant, label + '  ', grantTone(e.mode));
+    via(e.rule);
+  };
+  const date = new Date(record.time),
+    stamp = Number.isNaN(date.valueOf())
+      ? record.time
+      : date.toLocaleString(undefined, {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        });
+  const event =
+    record.action === 'scoped_permission'
+      ? statusLabel(record.status)
+      : record.applied === 'allow'
+        ? 'APPROVED'
+        : record.applied === 'ask'
+          ? 'APPROVAL NEEDED'
+          : record.applied === 'deny'
+            ? 'DENIED'
+            : record.applied === 'pending'
+              ? statusLabel(record.status)
+              : 'LEGACY';
+  const tone = eventTone(record);
+  const duration =
+    record.elapsedMs == null
+      ? ''
+      : record.elapsedMs >= 1000
+        ? (record.elapsedMs / 1000).toFixed(1) + ' s'
+        : record.elapsedMs + ' ms';
+  ui.title(
+    `${event} · ${safeText(record.action, 100)}`,
+    `${stamp}${duration ? ' · ' + duration : ''}`,
+    tone,
+  );
+  if (record.mode !== 'enforce')
+    ui.line(
+      `${safeText(record.mode)} · proposed ${record.proposed} · actual ${record.applied ?? 'not recorded'}`,
+      { tone: 'amber' },
+    );
+  if (record.applied === 'pending')
+    ui.line(
+      record.status === 'resolved'
+        ? 'Automatic reply not confirmed'
+        : 'Approval dialog available; background review active',
+      { tone: 'amber' },
+    );
+  if (record.applied === null) ui.line('Final outcome not recorded', { tone: 'amber' });
+  ui.line(shorten(record.preview), { prefix: record.action === 'shell' ? '$ ' : '' });
+  const reason =
+    record.modelDecision?.reason === record.reason ? record.modelDecision.reason : record.reason;
+  // A static allow is already explained by the per-grant matched rules.
+  if (record.code !== 'grant_rule' || record.applied !== 'allow') {
+    ui.section(
+      record.modelDecision?.reason === record.reason
+        ? `MODEL DECISION · ${record.modelDecision.effect}`
+        : 'DECISION',
+    );
+    ui.line(reason);
+  }
+  if (record.modelDecision && record.modelDecision.reason !== record.reason)
+    ui.line(`Model (${record.modelDecision.effect}): ${record.modelDecision.reason}`);
+  if (!data) {
+    ui.section('GRANTS');
+    ui.line(
+      'Details unavailable: ' +
+        safeText(record.detailError ?? record.details?.code ?? 'not stored for this event'),
+      { tone: 'amber' },
+    );
+  } else if (snapshot) {
+    ui.section(
+      'GRANTS AT DECISION',
+      `${snapshot.complete === true ? 'Complete analysis' : snapshot.complete === false ? 'Incomplete analysis' : 'Coverage not recorded'} · ${entries.length} atomic grant${entries.length === 1 ? '' : 's'}`,
+    );
+    if (snapshot.restriction) ui.line('Restriction: ' + snapshot.restriction, { tone: 'amber' });
+    if (!entries.length) ui.line('No atomic grants identified.', { tone: 'dim' });
+    entries.forEach(state);
+    if (objects(snapshot.unresolved).length) {
+      ui.section('UNRESOLVED', 'These effects require review.');
+      for (const u of objects(snapshot.unresolved)) {
+        ui.line(
+          `${safeText(u.reason ?? snapshot.reason ?? 'not recorded', 600)}${Number.isInteger(u.commandIndex) ? ' · command ' + (u.commandIndex + 1) : ''}`,
+          { indent: 4, tone: 'amber' },
         );
         if (u.command?.argv)
-          lines.push(
-            '      ' +
-              safeText(
-                array(u.command.argv)
-                  .map((x) => (typeof x === 'string' ? JSON.stringify(x) : '[dynamic value]'))
-                  .join(' '),
-                1200,
-              ),
+          ui.line(
+            shorten(
+              array(u.command.argv)
+                .map((x) => (typeof x === 'string' ? JSON.stringify(x) : '[dynamic value]'))
+                .join(' '),
+            ),
+            { indent: 6, tone: 'dim' },
           );
       }
     }
-  } else lines.push('  Grant analysis was not recorded for this event.');
-  const update = data.lifecycle?.ruleUpdate;
+  } else {
+    ui.section('GRANTS');
+    ui.line('Grant analysis was not recorded for this event.', { tone: 'dim' });
+  }
   if (update?.status === 'saved') {
-    lines.push('  Rule changes saved:');
+    ui.section('RULES SAVED', 'Confirmed store changes');
     for (const c of objects(update.changes)) {
-      lines.push('    ' + atomLabel(c.after));
-      lines.push(
-        `      ${c.before ? modeName(c.before.mode) : 'No exact rule'} → ${modeName(c.after?.mode)} · ${safeText(c.after?.authority, 40)}/${safeText(c.after?.scope, 40)}`,
+      atom(
+        c.after,
+        `${c.before ? modeName(c.before.mode) : 'No exact rule'} → ${modeName(c.after?.mode)}  `,
+        grantTone(c.after?.mode),
       );
+      ui.line(`${safeText(c.after?.authority)}/${safeText(c.after?.scope)}`, {
+        indent: 6,
+        tone: 'dim',
+      });
     }
     const before = new Map(objects(update.before).map((e) => [e.grant?.id, e]));
-    for (const after of objects(update.after)) {
-      const prior = before.get(after.grant?.id);
-      if (prior?.mode === after.mode) continue;
-      lines.push(
-        `    Grant state: ${modeName(prior?.mode)} → ${modeName(after.mode)} · ${atomLabel(after.grant)}`,
-      );
-      lines.push('      via ' + ruleLabel(after.rule));
+    const changed = objects(update.after).filter((e) => before.get(e.grant?.id)?.mode !== e.mode);
+    if (changed.length) {
+      ui.section('EFFECT ON GRANTS');
+      for (const after of changed)
+        atom(
+          after.grant,
+          `${modeName(before.get(after.grant?.id)?.mode)} → ${modeName(after.mode)}  `,
+          grantTone(after.mode),
+        );
     }
     if (update.stateError)
-      lines.push('    Grant-state comparison unavailable: ' + safeText(update.stateError));
+      ui.line('State comparison unavailable: ' + update.stateError, { tone: 'amber' });
   } else if (update?.status === 'failed' || record.code === 'rule_save_failed') {
-    lines.push('  Rule changes: NOT SAVED · ' + safeText(update?.reason ?? record.reason, 800));
+    ui.section('RULES NOT SAVED');
+    ui.line(update?.reason ?? record.reason, { tone: 'red' });
   } else {
-    const result = data.lifecycle?.result;
-    const selected = objects(result?.remember);
+    const selected = objects(data?.lifecycle?.result?.remember);
     if (record.code === 'model_rules_saved') {
-      lines.push('  Rules saved (legacy event; previous states not recorded):');
-      for (const g of selected) lines.push('    Always allow · ' + atomLabel(g));
-      if (!selected.length) lines.push('    ' + safeText(record.preview, 1200));
+      ui.section('RULES SAVED', 'Legacy event · previous states not recorded');
+      selected.forEach((g) => atom(g, 'Always allow  ', 'green'));
+      if (!selected.length) ui.line(shorten(record.preview));
     } else if (selected.length) {
-      lines.push('  Proposed rules (save not confirmed):');
-      for (const g of selected) lines.push('    ' + atomLabel(g));
-    } else if (record.code === 'model_allow_once') lines.push('  Rule changes: none (allow once).');
+      ui.section('PROPOSED RULES', 'Save not confirmed');
+      selected.forEach((g) => atom(g, '', 'cyan'));
+    } else if (record.code === 'model_allow_once')
+      ui.line('Allowed once · no rules changed.', { tone: 'dim' });
   }
-  if (record.detail.capture?.truncated)
-    lines.push('  Capture truncated: some audit evidence is unavailable.');
-  if (record.detail.capture?.redacted) lines.push('  Sensitive values were redacted.');
-  return lines.join('\n');
+  if (aliases.length || repositories.size) {
+    ui.section('PATH KEY');
+    for (const a of aliases)
+      ui.line(`${a.alias} = ${a.root.replace(os.homedir() + '/', '~/')}`, { tone: 'dim' });
+    for (const [id, name] of repositories)
+      ui.line(
+        `${safeText(name ?? id.slice(0, 8))}:scratch = linked worktrees of repository ${safeText(id.slice(0, 8))}`,
+        { tone: 'dim' },
+      );
+  }
+  if (record.detail?.capture?.truncated)
+    ui.line('Capture truncated: some audit evidence is unavailable.', { tone: 'amber' });
+  if (record.detail?.capture?.redacted) ui.line('Sensitive values were redacted.', { tone: 'dim' });
+  const origin = record.model ? `${record.model.id}/${record.model.variant}` : 'Static rules';
+  ui.line();
+  ui.line(
+    `${origin} · ${record.code}${record.stage ? ' · ' + record.stage : ''} · session ${shortSession(record.sessionID)}`,
+    { tone: 'dim' },
+  );
+  return ui.result();
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -338,6 +497,7 @@ export async function main(argv = process.argv.slice(2)) {
   let follow = false,
     json = false,
     details = false,
+    color = 'auto',
     policy;
   while (args.length) {
     const flag = args.shift();
@@ -345,17 +505,22 @@ export async function main(argv = process.argv.slice(2)) {
     else if (flag === '--json') json = true;
     else if (flag === '--details') details = true;
     else if (flag === '--model-only') options.modelOnly = true;
-    else if (['--limit', '--decision', '--session', '--policy'].includes(flag)) {
+    else if (['--limit', '--decision', '--session', '--policy', '--color'].includes(flag)) {
       const value = args.shift();
       if (!value || value.startsWith('--')) throw Error(`Missing value for ${flag}`);
-      if (flag === '--policy') policy = value;
+      if (flag === '--color') {
+        if (!['auto', 'always', 'never'].includes(value))
+          throw Error('Color must be auto, always, or never');
+        color = value;
+      } else if (flag === '--policy') policy = value;
       else options[flag.slice(2)] = flag === '--limit' ? Number(value) : value;
     } else if (flag === '--help' || flag === '-h') {
       process.stdout.write(
         'oc-approvals [--follow] [--decision ask|allow|deny] [--model-only]\n' +
-          '             [--session ID] [--limit 1..200] [--json|--details] [--policy FILE]\n' +
+          '             [--session ID] [--limit 1..200] [--json|--details] [--color auto|always|never] [--policy FILE]\n' +
           '--details  Expand pretty output with analysis, grants, matched rules, and saved changes.\n' +
           '--json     Emit JSON Lines including the stored detail payload.\n' +
+          '--color    Default: auto (TTY only; respects NO_COLOR). Use always with less -R.\n' +
           'Read local permission review records. V3 includes background states and native replies. It does not show command execution.\n',
       );
       return;
@@ -394,7 +559,9 @@ export async function main(argv = process.argv.slice(2)) {
           process.stdout.write(
             json
               ? JSON.stringify(output) + '\n'
-              : (details ? formatDetailedRecord(output) : formatRecord(record)) + '\n\n',
+              : (details
+                  ? formatDetailedRecord(output, { color })
+                  : formatRecord(record, { color })) + '\n\n',
           );
         }
       }

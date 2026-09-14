@@ -44,7 +44,7 @@ class ViewerInstallTest(unittest.TestCase):
                 self.assertEqual(after['attention'], {'enabled': True, 'notifications': True, 'sound': True})
                 self.assertTrue((Path(result['viewer'])/'approval-notifications.mjs').exists())
                 self.assertTrue(all((root/name).read_bytes() == data for name, data in before.items()))
-                output = subprocess.check_output([result['command'], '--limit', '10'], text=True)
+                output = subprocess.check_output([result['command'], '--details', '--color', 'always', '--limit', '10'], text=True)
                 self.assertIn('No matching audit records', output)
                 self.assertTrue((Path(result['backup'])/'cli.json').exists())
             after['attention'] = {'enabled': False, 'notifications': False, 'sound': False}

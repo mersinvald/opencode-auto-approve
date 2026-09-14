@@ -81,14 +81,14 @@ const record = (data, extra = {}) => ({
 
 test('pretty details show exact atoms, matched scopes and incomplete coverage', () => {
   const text = formatDetailedRecord(record({ grants: grantSnapshot(checked) }));
-  assert.match(text, /Analysis: incomplete · 2 atomic grants/);
-  assert.match(text, /Always allow · files.read.*\/fixture\/src\/file/);
-  assert.match(text, /via config\/global.*global defaults/);
-  assert.match(text, /Dynamic · files.write.*infra · scratch · src\/file/);
-  assert.match(text, /resolved: \/fixture\/wt\/src\/file/);
+  assert.match(text, /Incomplete analysis · 2 atomic grants/);
+  assert.match(text, /Always allow\s+files.read.*\/fixture\/src\/file/);
+  assert.match(text, /Rule: config\/global.*files.read.*\/fixture\//);
+  assert.match(text, /Dynamic\s+files.write.*infra:scratch\/src\/file/);
+  assert.match(text, /@infra = \/fixture\/wt/);
   assert.match(text, /unsupported_command · command 1/);
   assert.match(text, /"python3" "helper.py"/);
-  assert.match(text, /Rule changes: none \(allow once\)/);
+  assert.match(text, /Allowed once · no rules changed/);
 });
 
 test('saved model rules show transaction deltas and effective grant state changes', () => {
@@ -103,19 +103,19 @@ test('saved model rules show transaction deltas and effective grant state change
       { status: 'scoped_grant_created', code: 'model_rules_saved', action: 'scoped_permission' },
     ),
   );
-  assert.match(text, /Rule changes saved:/);
-  assert.match(text, /No exact rule → Always allow · model\/project/);
-  assert.match(text, /Grant state: Dynamic → Always allow · files.write/);
-  assert.doesNotMatch(text, /Grant state: Always allow →/);
+  assert.match(text, /RULES SAVED/);
+  assert.match(text, /No exact rule → Always allow\s+files.write/);
+  assert.match(text, /Dynamic → Always allow\s+files.write/);
+  assert.doesNotMatch(text, /Always allow →/);
 });
 
 test('proposed, failed, missing, truncated and unsafe details cannot masquerade as saved rules', () => {
   const data = { grants: grantSnapshot(checked), lifecycle: { result: { remember: [saved] } } };
-  assert.match(formatDetailedRecord(record(data)), /Proposed rules \(save not confirmed\)/);
+  assert.match(formatDetailedRecord(record(data)), /PROPOSED RULES\n\s+Save not confirmed/);
   data.lifecycle.ruleUpdate = { status: 'failed', reason: 'Concurrent rule change' };
   const failed = formatDetailedRecord(record(data));
   assert.match(failed, /NOT SAVED/);
-  assert.doesNotMatch(failed, /Rule changes saved:/);
+  assert.doesNotMatch(failed, /RULES SAVED/);
   assert.match(formatDetailedRecord(normalizeRecord(row)), /not stored/);
   assert.match(
     formatDetailedRecord({ ...normalizeRecord(row), detailError: 'hash mismatch' }),
@@ -164,11 +164,16 @@ test('CLI --details expands pretty output, --json includes the full payload, and
     const run = (...args) =>
       execFileSync(process.execPath, [cli, '--policy', policy, ...args], { encoding: 'utf8' });
     const pretty = run('--details');
-    assert.match(pretty, /Grants at decision/);
+    assert.match(pretty, /GRANTS AT DECISION/);
     assert.doesNotMatch(pretty, /raw-only-helper-body/);
+    assert.match(run('--details', '--color', 'always'), /\x1b\[32mAPPROVED/);
+    assert.doesNotMatch(run('--details', '--color', 'never'), /\x1b/);
+    assert.match(run('--color', 'always'), /\x1b\[32m/);
+    assert.doesNotMatch(run(), /\x1b/);
+    assert.doesNotMatch(run('--json', '--color', 'always'), /\x1b/);
     const json = JSON.parse(run('--json'));
     assert.equal(json.detail.data.helpers[0].body, 'raw-only-helper-body');
-    assert.doesNotMatch(run(), /Grants at decision/);
+    assert.doesNotMatch(run(), /GRANTS AT DECISION/);
     assert.match(run('--help'), /--json.*JSON Lines/);
     assert.throws(() => run('--details', '--json'));
     await writeAudit(audit, {
@@ -216,10 +221,10 @@ test('static approval details show the matched allow state without implying a ru
     resolution: { entries: [{ grant: read, mode: 'allow', rule: global }] },
   });
   const text = formatDetailedRecord(record({ grants: snapshot }, { code: 'grant_rule' }));
-  assert.match(text, /Analysis: complete · 1 atomic grant/);
-  assert.match(text, /Always allow · files.read/);
-  assert.match(text, /via config\/global/);
-  assert.doesNotMatch(text, /Rule changes saved/);
+  assert.match(text, /Complete analysis · 1 atomic grant/);
+  assert.match(text, /Always allow\s+files.read/);
+  assert.match(text, /Rule: config\/global/);
+  assert.doesNotMatch(text, /RULES SAVED/);
 });
 
 test('legacy command hashes do not appear as parsed atomic permissions', () => {
