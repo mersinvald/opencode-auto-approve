@@ -1,31 +1,78 @@
 # OpenCode Auto Approve
 
-Scoped permission review for **OpenCode 2.0.2** on macOS and Linux.
+Spend less time approving routine reads and edits. Keep control over what your agent can change.
 
-The plugin checks each native action against permission rules. A bounded shell parser derives operations and targets without executing the command. A review model handles requests that the rules cannot resolve.
+OpenCode Auto Approve handles permission requests while your agent works. Saved rules cover familiar operations. A review model uses your task context to decide what needs your attention.
 
-The model can allow once, ask the user, or remember an allowed scope. The native approval dialog stays available during review. Your response takes precedence over a pending model response.
+For **OpenCode 2.0.2** on **macOS and Linux**. Choose your own review model through an OpenAI-compatible endpoint.
 
-This is an approval assistant, not a command sandbox. Model decisions can be wrong. Read the [security boundaries](SECURITY.md) before you enable automatic approval.
+[Get started](#get-started) · [Project grants](#set-permissions-that-fit-your-project) · [Audit trail](#see-why-the-plugin-approved-an-action)
 
-## What it includes
+## Stay in control during model review
 
-- Rules for files, Git, local Beads operations, tests, shell commands, and unknown native actions.
-- A project grant tree with **Always allow**, **Always ask**, and **Dynamic** modes.
-- Static shell analysis with executable identity checks, bounded expansion, and conservative fallback.
-- Background model review with retries, cancellation, and checks for changed requests or rules.
-- An audit panel, a terminal viewer, detailed local records, and macOS approval notifications.
-- Synthetic tests for permission races, scope reuse, malformed responses, and model decisions.
+Recognized reads, searches, and read-only Git commands can pass without a model call when their scopes have permission. For other requests, the model reviews the action in the background.
 
-Existing bounded permissions retain their scope during import. Broad interpreter permissions become Dynamic rules in the plugin store. See [configuration](docs/configuration.md) for native permissions that bypass this store.
+Your usual approval dialog stays available during review. You can answer immediately, or let the model finish. An automatic approval clears the dialog and lets the agent continue. Your response takes precedence over a pending model response.
 
-## Install
+![OpenCode permission dialog with a background review in progress and Allow once and Reject controls](docs/images/approval-review.png)
 
-Requirements: Node.js 22 or later, Python 3.10 or later, Go 1.26 or later, and OpenCode **2.0.2**.
+_Screenshots show the actual OpenCode TUI with sample sessions, grants, and review results. The displayed timings illustrate the interface._
 
-OpenCode 1.x uses a different plugin API. This release does not support it. This release does not support Windows.
+The model has three choices:
 
-1. Clone this repository into a directory that you will keep.
+- **Allow once:** approve this request and continue.
+- **Escalate once:** ask you, with an explanation.
+- **Allow always:** save a permission for a specific operation and target in this project.
+
+For example, you can authorize edits under `src` while requiring approval before deployment. The model can remember a permitted scope, so later requests can pass through the rules without another model call.
+
+The model may remember deployment or other consequential operations only when your instructions explicitly authorize repeated use.
+
+## Set permissions that fit your project
+
+Press **Ctrl+G** or run **`/approval-grants`** to open the project grant tree. It shows observed operations, their target paths, and the rules that apply.
+
+![Grant tree: source edits allowed, payment changes require approval, and documentation uses model review](docs/images/project-grants.png)
+
+Each grant has one of three modes:
+
+| Mode             | What happens                                                         |
+| ---------------- | -------------------------------------------------------------------- |
+| **Always allow** | The rule permits this operation within its target scope.             |
+| **Always ask**   | The request goes directly to you.                                    |
+| **Dynamic**      | The model decides whether to approve, escalate, or remember a scope. |
+
+A more specific target can override its parent. In the example, the `src` rule allows edits, while changes under `src/payments` require approval.
+
+Use the arrow keys to select a scope. Press **A** for Always allow, **S** for Always ask, or **D** for Dynamic. Press **/** to filter by path or operation. The selected entry shows who set its rule and why.
+
+Saved project rules apply across sessions in that OpenCode project. You can change them later, including during pending reviews. File edits and local Beads updates have separate permissions.
+
+Use the grant tree to manage operation and path scopes. The **Always allow** option in the native dialog saves native patterns, which can be broader. See [native permission boundaries](docs/configuration.md#native-permission-boundaries) if you already have broad shell permissions.
+
+## See why the plugin approved an action
+
+Run **`/approval-audit`** to open the audit panel beside your session. Each entry shows the action, decision, reason, source, and review time.
+
+![Audit panel: deployment escalated, build approved by the model, and a file edit permitted by a rule](docs/images/approval-audit.png)
+
+Filter to **Asked** to inspect escalations, or **Model** to inspect model decisions. Press **D** for record identifiers and timestamps. Press **F** to expand the panel.
+
+For a separate terminal view:
+
+```sh
+oc-approvals --follow
+```
+
+Detailed local records support deeper investigation. They describe permission decisions, not proof that a command ran or succeeded. See [audit data and privacy](SECURITY.md).
+
+On macOS, notifications alert you when review escalates, fails, or remains pending for five minutes. Run **`/approval-notification-test`** to check notification delivery.
+
+## Get started
+
+Requirements: **OpenCode 2.0.2**, Node.js 22+, Python 3.10+, and Go 1.26+. OpenCode 1.x and Windows are not supported.
+
+1. Clone the plugin into a directory that you will keep.
 
    ```sh
    git clone https://github.com/mersinvald/opencode-auto-approve.git
@@ -33,54 +80,47 @@ OpenCode 1.x uses a different plugin API. This release does not support it. This
    npm ci
    ```
 
-2. Configure an OpenAI-compatible Chat Completions model in your OpenCode profile.
+2. Add a review model to your OpenCode profile using the [provider example](docs/configuration.md#classifier-provider).
 
-   The route must support tool calls and a named `reasoning_effort` variant.
-   See the [provider example](docs/configuration.md#classifier-provider).
+   The endpoint must support Chat Completions, tool calls, and the configured reasoning variant.
+   The example uses `review`, `classifier`, and `medium` as the identifiers for the next step.
 
-3. Install the plugin in shadow mode with your provider, model, and variant identifiers.
+3. Install in **shadow mode** to inspect decisions before enabling automatic approval.
 
    ```sh
    python3 install.py --provider review --model classifier --variant medium --mode shadow
    python3 build_static.py --config-root "$HOME/.config/opencode"
    ```
 
-4. Restart OpenCode and inspect `/approval-audit`.
+   Use your own provider, model, and variant identifiers if they differ from the example.
+   For a custom profile, pass `--config-root` to both scripts.
 
-   Shadow mode records decisions and leaves native approval requests for you.
+4. Restart OpenCode.
 
-5. Enable automatic approval when the audit results match your intended policy.
+5. Inspect **`/approval-audit`** during a task.
+
+   Shadow mode records proposed decisions and leaves native approval requests for you.
+
+6. When the audit matches your intended policy, enable automatic approval.
 
    ```sh
    python3 install.py --mode enforce
    ```
 
-The installer backs up the files it changes. It preserves existing model settings, grants, and plugin entries. It does not edit Slim or agent prompts.
+7. Restart OpenCode to load the installed version.
 
-The installed modules link to the dependencies in this checkout. Keep the checkout and its `node_modules` directory available. Repeat `npm ci` after an update.
+The installer backs up changed files and preserves existing models, grants, and plugin entries. It leaves Slim and agent prompts unchanged. Keep this checkout and its `node_modules` directory available.
 
-## Daily use
+Automatic approval does not sandbox commands. Model decisions can be wrong. Read the [security boundaries](SECURITY.md) before enabling it.
 
-| Interface                      | Purpose                                      |
-| ------------------------------ | -------------------------------------------- |
-| `Ctrl+G` or `/approval-grants` | Inspect project grants and change their mode |
-| `/approval-audit`              | Inspect recent permission reviews            |
-| `oc-approvals --help`          | Show terminal audit viewer options           |
-| Native permission dialog       | Answer immediately while the model reviews   |
-
-In the grant tree, use the arrow keys to navigate. Press **A** to allow, **S** to ask, or **D** for model review. Press **/** to filter.
-
-An Always ask rule goes directly to you. Dynamic permits model review. A remembered rule applies only within the current OpenCode project.
-
-## Documentation
+## More documentation
 
 - [Configuration, upgrades, and removal](docs/configuration.md)
-- [Decision flow and module map](docs/architecture.md)
+- [How permission decisions work](docs/architecture.md)
 - [Tests and infrastructure runners](docs/testing.md)
-- [Security and private audit data](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## License
 
-MIT. The shell parser uses `mvdan.cc/sh/v3` under its separate BSD 3-Clause license.
+[MIT](LICENSE). The shell parser uses `mvdan.cc/sh/v3` under its separate BSD 3-Clause license.
