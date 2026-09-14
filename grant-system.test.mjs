@@ -142,7 +142,7 @@ test('migration is idempotent, preserves bounded permissions, and neutralizes Py
     { id: 'psv_edit', projectID: 'pwa', action: 'edit', resource: '*' },
   ];
   const first = await store.import('pwa', native);
-  assert.equal(first.rules.find((r) => r.operation === 'shell.opaque').mode, 'dynamic');
+  assert.ok(!first.rules.some((r) => r.operation === 'shell.opaque'));
   const read = grant('files.read', worktree + '/services/finance/accountant/file.py');
   assert.equal(resolveGrants([read], first.rules).decision, 'allow');
   assert.equal(
@@ -209,7 +209,7 @@ test('saved worktree directory access and descendants use the same gate', async 
     'dynamic',
   );
 });
-test('every native action becomes grants, including unknown tools', async () => {
+test('native adapters emit semantic grants or mark analysis incomplete', async () => {
   for (const action of [
     'read',
     'edit',
@@ -231,7 +231,11 @@ test('every native action becomes grants, including unknown tools', async () => 
       },
       { scope, config },
     );
-    assert.ok(result.grants.length, action);
+    assert.ok(result.grants.length || result.complete === false, action);
+    if (['webfetch', 'mcp.github.create_issue', 'custom_operation'].includes(action)) {
+      assert.equal(result.complete, false);
+      assert.equal(result.grants.length, 0);
+    }
     assert.ok(
       result.grants.every((g) => g.id.startsWith('g_')),
       action,
@@ -276,7 +280,8 @@ test('unknown shell effects never inherit an allow from partial read grants', as
     assert.equal(result.analysis.complete, false, command);
     assert.equal(result.decision, 'dynamic', command);
     assert.ok(
-      result.analysis.grants.some((g) => g.operation === 'shell.opaque'),
+      !result.analysis.grants.some((g) => g.operation === 'shell.opaque') &&
+        result.analysis.unresolved.length > 0,
       command,
     );
   }
@@ -318,7 +323,7 @@ test('native deny and role restrictions take precedence', async () => {
     'ask',
   );
 });
-test('opaque grants cannot carry writer approval into a restricted role', async () => {
+test('unknown native actions cannot produce reusable approvals', async () => {
   const request = {
     action: 'custom_operation',
     effect: 'ask',
@@ -376,14 +381,14 @@ test('copying into a directory checks the actual destination child', async () =>
     ),
   );
 });
-test('exact helper grants change when helper source changes', async () => {
+test('unknown helpers remain per-request reviews after their source changes', async () => {
   const filename = worktree + '/helper.py';
   await writeFile(filename, "print('first')\n");
   const request = shell('python3 ' + filename);
   request.scripts = await scriptEvidence(request.tool, scope, config);
   const first = await extractAction(request, { scope, config, runtime: host(request) });
-  const item = first.grants.find((g) => g.operation === 'shell.opaque');
-  assert.ok(item);
+  assert.equal(first.complete, false);
+  assert.equal(first.grants.length, 0);
   await writeFile(filename, "print('changed')\n");
   request.scripts = await scriptEvidence(request.tool, scope, config);
   const second = await gate(request, {
@@ -391,10 +396,10 @@ test('exact helper grants change when helper source changes', async () => {
     config,
     runtime: host(request),
     permissions,
-    state: { rules: [{ ...item, mode: 'allow', scope: 'project', authority: 'user' }] },
+    state: { rules: [rule('files.*', worktree)] },
   });
   assert.equal(second.decision, 'dynamic');
-  assert.notEqual(second.analysis.grants.find((g) => g.operation === 'shell.opaque').id, item.id);
+  assert.equal(second.analysis.grants.length, 0);
 });
 test('model contract has exactly three decisions and no citation schema', () => {
   const id = grant('files.read', repo + '/README.md').id;

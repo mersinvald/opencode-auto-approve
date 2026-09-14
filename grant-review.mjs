@@ -7,7 +7,7 @@ import {
 } from './grant-decision.mjs';
 import { scriptEvidence, bounded } from './review-context.mjs';
 import { digest, redact } from './policy.mjs';
-import { selectedRulesHash } from './grant-rules.mjs';
+import { selectedRulesHash, grantDescriptor } from './grant-rules.mjs';
 
 export async function reviewDynamic(
   prepared,
@@ -39,7 +39,7 @@ export async function reviewDynamic(
         const analysis = {
           complete: checked.analysis.complete,
           reason: checked.analysis.reason,
-          commands: checked.analysis.commands,
+          unresolved: checked.analysis.unresolved,
           pathResolutions: checked.analysis.snapshots?.map(({ lexical, resolved }) => ({
             lexical,
             resolved,
@@ -49,15 +49,30 @@ export async function reviewDynamic(
         const data = {
           ...context,
           scope,
-          request,
+          request: { ...request, ...(request.action === 'shell' ? { resources: undefined } : {}) },
+          projectID: permissions.projectID,
           analysis,
-          grants: checked.resolution.entries,
+          grants: checked.resolution.entries.map(({ grant: item, mode, rule }) => ({
+            ...grantDescriptor(item),
+            id: item.id,
+            mode,
+            ...(item.physicalTarget
+              ? { physicalTarget: item.physicalTarget, repositoryName: item.repositoryName }
+              : {}),
+            rule: rule
+              ? { ...grantDescriptor(rule), mode: rule.mode, authority: rule.authority }
+              : null,
+          })),
           retryFeedback,
-          candidates: checked.candidates,
-          seen: state.seen
-            ?.filter((s) => checked.analysis.grants.some((g) => g.id === s.id))
-            .map((s) => ({ operation: s.operation, target: s.target, count: s.count })),
-          nativePermissions: permissions,
+          candidates: checked.candidates.map((c) => ({
+            ...grantDescriptor(c),
+            id: c.id,
+            ...(c.repositoryName ? { repositoryName: c.repositoryName } : {}),
+          })),
+          nativeRestrictions: {
+            readOnly: !!scope.readOnly,
+            deny: checked.analysis.constraints?.deny ?? [],
+          },
           beadsWriters: config.staticShell?.beadsWriters ?? ['orchestrator'],
         };
         if (redact(data).changed)

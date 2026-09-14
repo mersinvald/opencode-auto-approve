@@ -23,6 +23,8 @@ def main():
         info['id']='ses_grant_tui_fixture';seed['info']['id']=info['id']
         seed['messages']=[{'id':'msg_grant_fixture','type':'user','text':'Fixture for grant UI. Do not run a model.', 'time':{'created':int(time.time()*1000)}}]
         api.call('POST','/api/session/import',seed)
+        seed_scope = 'import {createRuleStore} from ' + json.dumps(str(source/'grant-store.mjs')) + ';import {grant} from ' + json.dumps(str(source/'grant-rules.mjs')) + ';await createRuleStore(' + json.dumps(str(config/'approval-policy.json')) + ').observe(' + json.dumps(info['projectID']) + ',[grant("files.write","src","directory",{space:{repository:"a".repeat(64),modifier:"scratch"},repositoryName:"fixture-infra"})],{});'
+        subprocess.run(['node','--input-type=module','-e',seed_scope],check=True)
         env=dict(os.environ,TERM='xterm-256color',OPENCODE_PASSWORD=password,OPENCODE_CONFIG_DIR=str(config),
           XDG_CONFIG_HOME=str(base),XDG_DATA_HOME=str(base/'state/data'),XDG_STATE_HOME=str(base/'state/state'),XDG_CACHE_HOME=str(base/'state/cache'))
         master,slave=pty.openpty();fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',50,140,0,0))
@@ -59,7 +61,12 @@ def main():
             (base/'tui.txt').write_text(text)
             assert any(r['operation']=='files.read' and r['mode']=='dynamic' and r['authority']=='user' for r in state['rules']), 'Filtered Dynamic edit did not persist: '+str(base)
             assert 'Project grants' in text and 'Always ask' in text, 'The tree did not render: '+str(base)
-            report={'base':str(base),'checks':['native_tui_loaded','tree_rendered','expand_key','single_key_rule_edit','filter_and_dynamic_edit'], 'userSessionsChanged':False}
+            os.write(master,b'/');pump(2);os.write(master,b'scratch');pump(1);os.write(master,b'\r');pump(3)
+            os.write(master,b'a');pump(2)
+            state=json.loads(states[0].read_text())
+            assert any(r.get('space',{}).get('modifier')=='scratch' and r['mode']=='allow' for r in state['rules']), 'Scratch tree scope did not persist: '+str(base)
+            assert b'fixture-infra' in output, 'Repository name did not render: '+str(base)
+            report={'base':str(base),'checks':['native_tui_loaded','tree_rendered','expand_key','single_key_rule_edit','filter_and_dynamic_edit','scratch_filter_and_rule_edit'], 'userSessionsChanged':False}
             (base/'report.json').write_text(json.dumps(report,indent=2));print(json.dumps(report),flush=True)
         finally:
             if proc.poll() is None:

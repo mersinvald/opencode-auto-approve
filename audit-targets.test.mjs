@@ -330,7 +330,7 @@ test('prompt prefers bounded recurring inspection grants while honoring one-time
     /prefer allow_always for repeated local inspection \(git.read, files.read, files.list, files.access\)/,
   );
   assert.match(prompt, /once only or do not remember/);
-  assert.match(prompt, /not shell.opaque or a wildcard executable rule/);
+  assert.match(prompt, /git.read scoped to its repository/);
 });
 
 // Embedded Dolt makes the installed, explicitly pinned Beads binary 128 MiB.

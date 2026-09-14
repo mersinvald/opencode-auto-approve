@@ -1,6 +1,7 @@
+import { worktreeGrant } from './grant-space.mjs';
 import path from 'node:path';
 import { lstat } from 'node:fs/promises';
-import { grant, resolveGrants, covers } from './grant-rules.mjs';
+import { grant, resolveGrants, covers, grantDescriptor } from './grant-rules.mjs';
 import { extractAction } from './action-grants.mjs';
 import { digest, within, secretPath, policyPath } from './policy.mjs';
 import { repositoryScope } from './repository-scope.mjs';
@@ -102,7 +103,8 @@ export function nativeRestriction(request, analysis, permissions, scope, config)
         item.operation === 'beads.manage'
           ? ['*', 'edit', 'external_directory']
           : ['*', 'read', 'external_directory'];
-      if (actions.includes(r.action) && matches(r.resource, item.target)) return 'Native deny rule';
+      if (actions.includes(r.action) && matches(r.resource, item.physicalTarget ?? item.target))
+        return 'Native deny rule';
     }
     if (
       ['*', 'shell'].includes(r.action) &&
@@ -114,14 +116,38 @@ export function nativeRestriction(request, analysis, permissions, scope, config)
 }
 export async function gate(request, { scope, config, runtime, permissions, state, signal }) {
   const analysis = await extractAction(request, { scope, config, runtime, permissions, signal });
+  analysis.grants = await Promise.all(analysis.grants.map(worktreeGrant));
   const rules = [...globalRules(config, scope), ...state.rules];
   const resolution = resolveGrants(analysis.grants, rules);
-  const restricted = nativeRestriction(request, analysis, permissions, scope, config);
+  const restricted =
+    nativeRestriction(request, analysis, permissions, scope, config) ??
+    (state.legacyNativeAsk?.some((action) => action === '*' || action === request.action)
+      ? 'A legacy native Always ask rule requires migration to atomic permissions.'
+      : null);
   const candidates = new Map();
   for (const { grant: item, mode } of resolution.entries) {
     if (mode !== 'dynamic' || item.rememberable === false) continue;
     candidates.set(item.id, item);
-    if (['file', 'directory'].includes(item.targetType)) {
+    if (item.space) {
+      for (
+        let p = item.targetType === 'file' ? path.dirname(item.target) : item.target;
+        ;
+        p = path.dirname(p)
+      ) {
+        const broader = grant(item.operation, p, 'directory', {
+          space: item.space,
+          repositoryName: item.repositoryName,
+        });
+        const physical = path.resolve(item.binding.root, p);
+        if (
+          !secretPath(physical) &&
+          !policyPath(physical, [...config.protectedRoots, ...config.skillRoots]) &&
+          !resolution.entries.some((e) => e.mode === 'ask' && covers(broader, e.grant))
+        )
+          candidates.set(broader.id, broader);
+        if (p === '.') break;
+      }
+    } else if (['file', 'directory'].includes(item.targetType)) {
       const parent = item.targetType === 'file' ? path.dirname(item.target) : item.target;
       let existing = parent;
       while (
@@ -160,18 +186,28 @@ export async function gate(request, { scope, config, runtime, permissions, state
     resolution,
     candidates: [...candidates.values()],
     rulesHash: digest(state.rules),
-    decision: restricted ? 'ask' : resolution.decision,
-    reason: restricted,
+    decision:
+      restricted ||
+      resolution.decision === 'ask' ||
+      (state.legacyShellAsk && request.action === 'shell')
+        ? 'ask'
+        : analysis.complete
+          ? resolution.decision
+          : 'dynamic',
+    reason:
+      restricted ??
+      (state.legacyShellAsk && request.action === 'shell'
+        ? 'A legacy command-specific Always ask rule requires migration to atomic permissions.'
+        : null),
     fingerprint: digest({
       analysis,
       restricted,
+      legacyShellAsk: !!state.legacyShellAsk,
       resolution: resolution.entries.map((e) => ({
         id: e.grant.id,
         mode: e.mode,
         rule: e.rule && {
-          operation: e.rule.operation,
-          target: e.rule.target,
-          targetType: e.rule.targetType,
+          ...grantDescriptor(e.rule),
           mode: e.rule.mode,
         },
       })),

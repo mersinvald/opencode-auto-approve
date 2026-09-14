@@ -21,7 +21,7 @@ import { nativeTransport } from './native-transport.mjs';
 import { createAsyncReview, fingerprint, pause, reviewMarker } from './async-review.mjs';
 import { createStructuredClassifier } from './structured-classifier.mjs';
 import { createRuleStore, legacyGrants, ruleDirectory } from './grant-store.mjs';
-import { ruleKey, selectedRulesHash } from './grant-rules.mjs';
+import { ruleKey, selectedRulesHash, grantDescriptor } from './grant-rules.mjs';
 import { captureShellRuntime } from './shell-host.mjs';
 import { gate } from './grant-gate.mjs';
 import { reviewDynamic } from './grant-review.mjs';
@@ -307,9 +307,8 @@ export function createApprovalPlugin({ generate: override } = {}) {
                 for (const item of result.remember) {
                   state.rules = state.rules.filter((r) => ruleKey(r) !== ruleKey(item));
                   state.rules.push({
-                    operation: item.operation,
-                    target: item.target,
-                    targetType: item.targetType,
+                    ...grantDescriptor(item),
+                    ...(item.repositoryName ? { repositoryName: item.repositoryName } : {}),
                     mode: 'allow',
                     scope: 'project',
                     authority: 'model',

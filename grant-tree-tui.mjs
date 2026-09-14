@@ -3,7 +3,7 @@ import os from 'node:os';
 import { createElement, insert, setProp } from '@opentui/solid';
 import { createComponent, createSignal, For, onCleanup } from 'solid-js';
 import { createRuleStore } from './grant-store.mjs';
-import { grantTree, modeLabels } from './grant-rules.mjs';
+import { grantTree, modeLabels, grantLabel } from './grant-rules.mjs';
 import { globalRules } from './grant-gate.mjs';
 import { safeText } from './audit.mjs';
 import { writeAudit } from './audit-storage.mjs';
@@ -49,7 +49,7 @@ export function createGrantPanel({ ctx, policyFile }) {
           const visit = (n, depth) => {
             const visible =
               !query ||
-              (n.operation + ' ' + n.target + ' ' + (n.rule?.provenance?.reason ?? ''))
+              (n.operation + ' ' + grantLabel(n) + ' ' + (n.rule?.provenance?.reason ?? ''))
                 .toLowerCase()
                 .includes(query);
             if (visible) result.push({ ...n, depth });
@@ -100,13 +100,13 @@ export function createGrantPanel({ ctx, policyFile }) {
               applied: mode === 'allow' ? 'allow' : 'ask',
               mode: 'enforce',
               elapsedMs: 0,
-              preview: `${item.operation}: ${item.target}`,
+              preview: `${item.operation}: ${grantLabel(item)}`,
               reason: `User selected ${modeLabels[mode]}.`,
               permissionContext: { projectID: session.projectID },
             });
             await refresh();
             setStatus(
-              `${modeLabels[mode]} · ${item.operation} · ${item.target}. Pending reviews will update.`,
+              `${modeLabels[mode]} · ${item.operation} · ${grantLabel(item)}. Pending reviews will update.`,
             );
           } catch (e) {
             setStatus(safeText(e.message));
@@ -154,7 +154,7 @@ export function createGrantPanel({ ctx, policyFile }) {
                       `${selected() === index() ? '›' : ' '} ${item.children.length ? (expanded().has(item.key) ? '▾' : '▸') : '·'} `,
                   ),
                   text(
-                    `${safeText(item.targetType === 'any' ? item.operation : (item.label ?? item.target.replace(os.homedir() + '/', '~/')), 800)}  `,
+                    `${safeText(item.targetType === 'any' ? item.operation : grantLabel(item).replace(os.homedir() + '/', '~/'), 800)}  `,
                   ),
                   text(
                     modeLabels[item.mode],

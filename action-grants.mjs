@@ -68,7 +68,7 @@ export async function extractAction(request, { scope, config, runtime, permissio
   };
   const changed = new Map();
   let mutation = 0;
-  const target = async (raw, cwd, effect = 'read') => {
+  const target = async (raw, cwd, effect = 'read', targetType) => {
     const lexical = path.resolve(cwd, raw),
       resolved = await canonical(raw, cwd);
     let stat;
@@ -89,7 +89,8 @@ export async function extractAction(request, { scope, config, runtime, permissio
     add(
       op,
       resolved,
-      stat?.isDirectory() || effect === 'access' || effect === 'list' ? 'directory' : 'file',
+      targetType ??
+        (stat?.isDirectory() || effect === 'access' || effect === 'list' ? 'directory' : 'file'),
     );
     snapshots.push({ lexical, resolved, dev: stat?.dev, ino: stat?.ino, mode: stat?.mode });
     return resolved;
@@ -726,9 +727,29 @@ export async function extractAction(request, { scope, config, runtime, permissio
             for (let i = 2; i < a.length; i++) {
               if (
                 /^-[qvsx]+$/.test(a[i]) ||
-                ['--disable-warnings', '--collect-only'].includes(a[i])
+                ['--no-header', '--disable-warnings', '--collect-only'].includes(a[i])
               )
                 continue;
+              if (/^--tb=(?:auto|long|short|line|native|no)$/.test(a[i])) continue;
+              if (
+                a[i] === '-W' &&
+                /^(?:error|ignore|always|default|module|once)::(?:Warning|UserWarning|DeprecationWarning|RuntimeWarning|FutureWarning)$/.test(
+                  a[i + 1] ?? '',
+                )
+              ) {
+                i++;
+                continue;
+              }
+              if (a[i] === '--basetemp' || a[i].startsWith('--basetemp=')) {
+                const destination =
+                  a[i] === '--basetemp' ? a[++i] : a[i].slice('--basetemp='.length);
+                if (!destination || destination.startsWith('-')) fail('pytest_basetemp');
+                // Pytest removes this directory before reuse. Read/write alone
+                // cannot authorize that effect, even when tests are allowed.
+                await target(destination, state.cwd, 'delete', 'directory');
+                await target(destination, state.cwd, 'write', 'directory');
+                continue;
+              }
               if (a[i] === '-p' && a[++i] === 'no:cacheprovider') continue;
               if (a[i].startsWith('-') || /[\0*?]/.test(a[i])) fail('pytest_flags');
               const file = await canonical(a[i].split('::')[0], state.cwd);
@@ -1037,41 +1058,39 @@ export async function extractAction(request, { scope, config, runtime, permissio
       )
         fail('authority_modified_in_command');
       if (!items.size) add('shell.stream', cwd, 'directory');
+    } else if (
+      [
+        'execute',
+        'skill',
+        'subagent',
+        'question',
+        'ask_coordinator',
+        'answer_worker',
+        'steer_worker',
+        'wait_worker',
+        'batch_status',
+        'task_status',
+        'task_result',
+        'task_cancel',
+        'wait_for_user',
+        'approval_scratch',
+      ].includes(request.action)
+    ) {
+      add('native.' + request.action, '*', 'any');
     } else {
-      const op = 'native.' + request.action.replace(/[^a-zA-Z0-9_.:/-]/g, '_');
-      for (const resource of request.resources?.length ? request.resources : ['*'])
-        add(
-          op,
-          digest({ resource, input: request.tool?.input, metadata: request.metadata, constraints }),
-          'exact',
-          { label: String(resource).slice(0, 200), rememberable: !!request.tool?.input },
-        );
+      fail('unsupported_native_action');
     }
   } catch (error) {
     complete = false;
     reason = error.message;
   }
-  if (!complete)
-    add(
-      request.action === 'shell' ? 'shell.opaque' : 'native.opaque',
-      digest({
-        action: request.action,
-        resources: request.resources,
-        tool: request.tool,
-        scripts: request.scripts,
-        cwd: requestDirectory(request),
-        host: host?.fingerprint ?? null,
-        constraints,
-      }),
-      'exact',
-      {
-        label: request.tool?.input?.command?.split('\n')[0] ?? request.action,
-        rememberable: !!host && reason !== 'runtime_unavailable',
-      },
-    );
   return {
     complete,
     reason,
+    unresolved: complete
+      ? []
+      : [{ reason, commandIndex: commands.length ? commands.length - 1 : null }],
+    constraints,
     grants: [...items.values()],
     commands,
     snapshots,

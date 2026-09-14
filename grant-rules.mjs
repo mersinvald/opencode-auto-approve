@@ -1,6 +1,18 @@
 import path from 'node:path';
 import { digest, within } from './policy.mjs';
 
+export const isLegacyCommand = (r) => ['shell.opaque', 'native.opaque'].includes(r.operation);
+export const grantDescriptor = (r) => ({
+  operation: r.operation,
+  target: r.target,
+  targetType: r.targetType,
+  ...(r.space ? { space: r.space } : {}),
+});
+export const grantLabel = (r) =>
+  r.space
+    ? `${r.repositoryName ?? r.space.repository.slice(0, 10)} · scratch · ${r.target}`
+    : r.target;
+
 export const modes = ['allow', 'ask', 'dynamic'];
 export const modeLabels = { allow: 'Always allow', ask: 'Always ask', dynamic: 'Dynamic' };
 export function grant(operation, target, targetType = 'file', extra = {}) {
@@ -14,7 +26,22 @@ export function grant(operation, target, targetType = 'file', extra = {}) {
     !['file', 'directory', 'exact', 'any'].includes(targetType)
   )
     throw Error('Invalid grant');
-  if (['file', 'directory'].includes(targetType)) {
+  if (extra.space) {
+    if (
+      !/^[a-f0-9]{64}$/.test(extra.space.repository ?? '') ||
+      extra.space.modifier !== 'scratch' ||
+      Object.keys(extra.space).some((k) => !['repository', 'modifier'].includes(k))
+    )
+      throw Error('Invalid grant space');
+    if (
+      !['file', 'directory'].includes(targetType) ||
+      path.isAbsolute(target) ||
+      target.includes('\\') ||
+      target.split('/').includes('..')
+    )
+      throw Error('Invalid relative grant target');
+    target = path.posix.normalize(target);
+  } else if (['file', 'directory'].includes(targetType)) {
     if (!path.isAbsolute(target)) throw Error('Grant path must be absolute');
     target = path.normalize(target);
   }
@@ -23,12 +50,13 @@ export function grant(operation, target, targetType = 'file', extra = {}) {
     operation,
     target,
     targetType,
-    id: 'g_' + digest({ operation, target, targetType }).slice(0, 24),
+    id:
+      'g_' +
+      digest(grantDescriptor({ operation, target, targetType, space: extra.space })).slice(0, 24),
   };
 }
 
-export const ruleKey = (r) =>
-  digest({ operation: r.operation, target: r.target, targetType: r.targetType });
+export const ruleKey = (r) => digest(grantDescriptor(r));
 export const selectedRulesHash = (rules, items) => {
   const keys = new Set(items.map(ruleKey));
   return digest(
@@ -40,12 +68,30 @@ const operationMatches = (pattern, operation) =>
   pattern === operation ||
   (pattern.endsWith('.*') && operation.startsWith(pattern.slice(0, -1)));
 export function covers(rule, item) {
+  if (isLegacyCommand(rule) || isLegacyCommand(item)) return false;
+  if (rule.space) {
+    if (
+      !item.space ||
+      rule.space.repository !== item.space.repository ||
+      rule.space.modifier !== item.space.modifier
+    )
+      return false;
+  } else if (item.space) {
+    // Absolute legacy/global rules keep their exact physical boundary.
+    if (!item.physicalTarget)
+      return rule.targetType === 'any' && operationMatches(rule.operation, item.operation);
+    item = { ...item, target: item.physicalTarget };
+  }
   return (
     operationMatches(rule.operation, item.operation) &&
     (rule.targetType === 'any' ||
       (rule.targetType === 'directory' &&
         ['file', 'directory'].includes(item.targetType) &&
-        within(item.target, rule.target)) ||
+        (rule.space
+          ? rule.target === '.' ||
+            item.target === rule.target ||
+            item.target.startsWith(rule.target + '/')
+          : within(item.target, rule.target))) ||
       (rule.targetType !== 'directory' &&
         rule.target === item.target &&
         rule.targetType === item.targetType))
@@ -58,16 +104,20 @@ const rank = (r) => [
   r.scope === 'project' ? 1 : 0,
   r.authority === 'user' ? 2 : r.authority === 'model' ? 1 : 0,
 ];
-function compare(a, b) {
-  const x = rank(a),
-    y = rank(b);
+function compare(a, b, item) {
+  const physical = (r) =>
+    r.space && item?.binding?.root
+      ? { ...r, target: path.resolve(item.binding.root, r.target) }
+      : r;
+  const x = rank(physical(a)),
+    y = rank(physical(b));
   for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return y[i] - x[i];
   return (
     (b.updatedAt ?? '').localeCompare(a.updatedAt ?? '') || ruleKey(a).localeCompare(ruleKey(b))
   );
 }
 export function resolveGrant(item, rules) {
-  const matches = rules.filter((r) => covers(r, item)).sort(compare);
+  const matches = rules.filter((r) => covers(r, item)).sort((a, b) => compare(a, b, item));
   const selected = matches.find((r) => r.locked && r.mode === 'ask') ?? matches[0];
   return { grant: item, mode: selected?.mode ?? 'dynamic', rule: selected ?? null };
 }
@@ -91,14 +141,30 @@ export function grantTree(seen, rules) {
     if (!nodes.has(key)) nodes.set(key, { ...item, key, children: [], seen: false });
     return nodes.get(key);
   };
-  for (const item of [...seen, ...rules]) {
+  for (const item of [...seen, ...rules].filter((r) => !isLegacyCommand(r))) {
     const node = add(item);
     node.seen ||= seen.some((s) => ruleKey(s) === node.key);
     if (['file', 'directory'].includes(item.targetType)) {
       let parent = path.dirname(item.target);
       while (true) {
-        add({ operation: item.operation, target: parent, targetType: 'directory' });
-        if (parent === '/') break;
+        add({
+          operation: item.operation,
+          target: parent,
+          targetType: 'directory',
+          ...(item.space
+            ? {
+                space: item.space,
+                repositoryName: item.repositoryName,
+                ...(item.binding
+                  ? {
+                      binding: item.binding,
+                      physicalTarget: path.resolve(item.binding.root, parent),
+                    }
+                  : {}),
+              }
+            : {}),
+        });
+        if (parent === (item.space ? '.' : '/')) break;
         parent = path.dirname(parent);
       }
     }
@@ -112,12 +178,15 @@ export function grantTree(seen, rules) {
         : nodes.get(
             ruleKey({
               operation: node.operation,
+              ...(node.space && node.target !== '.' ? { space: node.space } : {}),
               target:
-                ['file', 'directory'].includes(node.targetType) && node.target !== '/'
+                ['file', 'directory'].includes(node.targetType) &&
+                node.target !== (node.space ? '.' : '/')
                   ? path.dirname(node.target)
                   : '*',
               targetType:
-                ['file', 'directory'].includes(node.targetType) && node.target !== '/'
+                ['file', 'directory'].includes(node.targetType) &&
+                node.target !== (node.space ? '.' : '/')
                   ? 'directory'
                   : 'any',
             }),

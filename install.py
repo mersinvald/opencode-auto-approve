@@ -19,7 +19,7 @@ def link_runtime(destination):
     if not target.exists():
         target.symlink_to(modules, target_is_directory=True)
 
-PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-review.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-storage.mjs', 'audit-view.mjs', 'package.json']
+PLUGIN_FILES = ['index.mjs', 'review-context.mjs', 'async-review.mjs', 'native-transport.mjs', 'native-permissions.mjs', 'policy.mjs', 'grant-decision.mjs', 'structured-classifier.mjs', 'shell-context.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-review.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'repository-scope.mjs', 'audit.mjs', 'audit-detail.mjs', 'audit-storage.mjs', 'audit-view.mjs', 'package.json']
 
 def private_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,7 @@ def install_audit_viewer(root, bin_dir=None):
         shutil.copy2(launcher, backup/'oc-approvals')
     destination.mkdir(parents=True, exist_ok=True)
     link_runtime(destination)
-    for name in ['audit.mjs', 'audit-detail.mjs', 'audit-view.mjs', 'policy.mjs', 'shell-context.mjs', 'audit-storage.mjs', 'repository-scope.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'grant-tree-tui.mjs', 'approval-notifications.mjs']:
+    for name in ['audit.mjs', 'audit-detail.mjs', 'audit-view.mjs', 'policy.mjs', 'shell-context.mjs', 'audit-storage.mjs', 'repository-scope.mjs', 'shell-host.mjs', 'shell-words.mjs', 'shell-inspection.mjs', 'sqlite-read.mjs', 'action-grants.mjs', 'grant-gate.mjs', 'grant-space.mjs', 'grant-rules.mjs', 'grant-store.mjs', 'grant-tree-tui.mjs', 'approval-notifications.mjs']:
         shutil.copy2(SOURCE/name, destination/name)
     shutil.copy2(SOURCE/'audit-tui.mjs', destination/'tui.mjs')
     (destination/'index.mjs').write_text("export { default } from './tui.mjs';\n")

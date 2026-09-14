@@ -32,6 +32,16 @@ The model may remember deployment or other consequential operations only when yo
 
 ## Set permissions that fit your project
 
+Commands share permissions for their effects. For example, `cat src/a.ts` and `head -20 src/b.ts` can use one `files.read` rule for `src`.
+
+A command passes immediately only when the parser understands every effect and all its grants allow the action. Any effective **Always ask** rule sends the request directly to you. Unknown effects require an AI decision for that request and create no command entry in the grant tree.
+
+### Reuse permissions across worktrees
+
+The tree labels linked checkout targets as `<repository> · scratch · <relative path>`. A permission for `infra · scratch · services/accountant` also applies in later worktrees of that repository.
+
+These rules stay within the current OpenCode project. They cover neither the main checkout nor another repository. A project can hold separate rules for several repositories. Git linkage verification establishes each repository's identity.
+
 Press **Ctrl+G** or run **`/approval-grants`** to open the project grant tree. It shows observed operations, their target paths, and the rules that apply.
 
 ![Grant tree: source edits allowed, payment changes require approval, and documentation needs an AI decision](docs/images/project-grants.png)

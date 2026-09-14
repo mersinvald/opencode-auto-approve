@@ -40,7 +40,7 @@ export default {id:'local.approval-review',async setup(ctx){
   appendFileSync("""+json.dumps(str(base/'calls.jsonl'))+""",JSON.stringify({name,n})+'\\n');
   await new Promise(r=>setTimeout(r,name==='cancel'?1000:50));signal.throwIfAborted();
   if(name==='malformed'&&n===1)return {text:'not json'};
-  if(name==='concurrent')await rules.set(data.nativePermissions.projectID,{operation:'files.read',target:'/fixture/unrelated',targetType:'file'},'allow','user',{source:'concurrent fixture'});
+  if(name==='concurrent')await rules.set(data.projectID,{operation:'files.read',target:'/fixture/unrelated',targetType:'file'},'allow','user',{source:'concurrent fixture'});
   const decision=name==='escalate'?'escalate_once':['remember','cancel','concurrent'].includes(name)?'allow_always':'allow_once';
   return {text:JSON.stringify({decision,reason:'Synthetic '+name+' decision.',remember:decision==='allow_always'?[data.candidates[0].id]:[]})};
  }}).setup({...ctx,permission,options:{policyFile}});
@@ -49,7 +49,7 @@ export default {id:'local.approval-review',async setup(ctx){
   if(e.action!=='fixture_set_rule')return;
   const session=await ctx.session.get({sessionID:e.sessionID});
   const state=await rules.read(session.projectID);
-  const item=state.seen.find(g=>g.label===e.metadata.label);
+  const item=state.seen.find(g=>g.target.endsWith('/'+e.metadata.label));
   if(!item)throw Error('Missing seen grant');
   await rules.set(session.projectID,item,e.metadata.mode,'user',{source:'native fixture'});e.effect='allow';
  });
@@ -82,10 +82,10 @@ export default {id:'local.approval-review',async setup(ctx){
             data['info'].update(id=sid,title=name)
             data['messages']=[{'id':'msg_user_'+name,'type':'user','text':'Perform these fixture operations repeatedly. This is a synthetic permission test.', 'time':{'created':stamp}},
               {'id':'msg_tool_'+name,'type':'assistant','agent':'build','model':model,'time':{'created':stamp,'completed':stamp},'finish':'stop',
-                'content':[{'type':'tool','id':'call_'+name,'name':'fixture_operation','state':{'status':'completed','input':{'case':alias or name},
+                'content':[{'type':'tool','id':'call_'+name,'name':'edit','state':{'status':'completed','input':{'case':alias or name},
                   'content':[{'type':'text','text':'Fixture only. Never executed.'}]},'time':{'created':stamp,'completed':stamp}}]}]
             api.call('POST','/api/session/import',data)
-            r=api.call('POST',f'/api/session/{sid}/permission',{'action':'fixture_operation','resources':[alias or name],'agent':'build',
+            r=api.call('POST',f'/api/session/{sid}/permission',{'action':'edit','resources':[str(other/(alias or name))],'agent':'build',
               'source':{'type':'tool','messageID':'msg_tool_'+name,'id':'call_'+name}})
             return sid,r
         def final(rid):return next((r for r in reversed(rows()) if r.get('requestID')==rid and r.get('status') in ['allow','ask','native_reply']),None)

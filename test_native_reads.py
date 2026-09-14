@@ -27,8 +27,8 @@ export default {id:'local.approval-review',async setup(ctx){
    try{return await target.get(x,o);}catch(e){log({kind:'sdk_error',name:e.name,tag:e._tag});throw e;}
  };const v=target[key];return typeof v==='function'?v.bind(target):v;}});
  const cleanup=await createApprovalPlugin({generate:async({prompt})=>{
-   const data=JSON.parse(prompt.split('\\n').at(-1));log({kind:'model',action:data.request.action,grants:data.grants.map(x=>x.grant)});
-   const secret=data.grants.some(x=>x.grant.operation==='secrets.read');
+   const data=JSON.parse(prompt.split('\\n').at(-1));log({kind:'model',action:data.request.action,grants:data.grants});
+   const secret=data.grants.some(x=>x.operation==='secrets.read');
    const listing=data.candidates.find(c=>c.operation==='files.list');
    return {text:JSON.stringify({decision:secret?'escalate_once':listing?'allow_always':'allow_once',
      remember:!secret&&listing?[listing.id]:[],reason:secret?'Synthetic secret read requires review.':'Authorized fixture inspection.'})};
