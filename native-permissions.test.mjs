@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, chmod, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -46,6 +47,19 @@ const allow = {
   authorization: 'task',
   evidence: null,
   reason: 'Routine task edits.',
+};
+
+// Spawn a child that exits immediately, await its 'exit' (which reaps the
+// pid on both macOS and Linux), and return a pid the OS issued but that is
+// no longer running. Use this for any test fixture that needs a dead pid so
+// the test does not depend on a hardcoded value being out of range.
+const deadPid = async () => {
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
+  return child.pid;
 };
 
 test('saved grants from another project and malformed rules fail closed', async () => {
@@ -198,8 +212,10 @@ test('discovery adapter uses authenticated loopback, the same process, bounded d
   };
   const read = savedPermissionReader({ permission: {} }, { serviceFile: file, fetcher });
   assert.deepEqual(await read('pwa'), rows);
+  const stalePid = await deadPid();
   for (const update of [
-    { pid: process.pid + 1 },
+    // A pid whose process has been reaped must fail the liveness probe.
+    { pid: stalePid },
     { url: 'https://example.org' },
     { url: 'http://127.0.0.1:12345/other' },
     { url: 'http://name:password@127.0.0.1:12345' },
@@ -222,4 +238,53 @@ test('discovery adapter uses authenticated loopback, the same process, bounded d
       { serviceFile: file, fetcher: async () => new Response(' '.repeat(256 * 1024 + 1)) },
     )('pwa'),
   );
+});
+
+test('service discovery liveness probe: stale pid rejects, live pid succeeds', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'approval-liveness-'));
+  const file = path.join(dir, 'service.json');
+  const service = { url: 'http://127.0.0.1:12345', pid: process.pid, password: 'fixture-only' };
+  const save = async (value) => writeFile(file, JSON.stringify(value), { mode: 0o600 });
+  const okFetcher = async () => {
+    return new Response(JSON.stringify({ data: rows }));
+  };
+
+  // alive=false → stale-pid message naming the pid and file, even for our own pid.
+  await save({ ...service, pid: 424242 });
+  await assert.rejects(
+    savedPermissionReader({ permission: {} }, { serviceFile: file, fetcher: okFetcher, alive: () => false })('pwa'),
+    (e) =>
+      e.message ===
+      `Stale OpenCode service discovery file (pid 424242 not running); restart opencode serve --service or remove ${file}`,
+  );
+
+  // alive=true with a different-but-live pid → succeeds (fetcher called).
+  let calls = 0;
+  await save({ ...service, pid: 12345 });
+  const countedFetcher = async () => {
+    calls++;
+    return new Response(JSON.stringify({ data: rows }));
+  };
+  const viaStub = savedPermissionReader(
+    { permission: {} },
+    { serviceFile: file, fetcher: countedFetcher, alive: () => true },
+  );
+  assert.deepEqual(await viaStub('pwa'), rows);
+  assert.equal(calls, 1);
+
+  // Default probe: pid = process.pid is alive → succeeds.
+  await save({ ...service, pid: process.pid });
+  const defaultRead = savedPermissionReader({ permission: {} }, { serviceFile: file, fetcher: countedFetcher });
+  assert.deepEqual(await defaultRead('pwa'), rows);
+  assert.equal(calls, 2);
+
+  // Default probe: a pid whose process exited and was reaped earlier in this
+  // test is not running on any host → stale-pid error.
+  const stalePid = await deadPid();
+  await save({ ...service, pid: stalePid });
+  await assert.rejects(
+    savedPermissionReader({ permission: {} }, { serviceFile: file, fetcher: countedFetcher })('pwa'),
+    new RegExp(`Stale OpenCode service discovery file \\(pid ${stalePid} not running\\)`),
+  );
+  assert.equal(calls, 2);
 });

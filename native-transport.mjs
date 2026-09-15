@@ -4,12 +4,22 @@ import os from 'node:os';
 import path from 'node:path';
 
 // Only the current loopback service may receive its private credential.
+// The default liveness probe treats ESRCH (no such process) as not alive and
+// any other error (for example EPERM, owned by another uid) as alive.
+const defaultAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error && error.code !== 'ESRCH';
+  }
+};
 export function nativeTransport({
   serviceFile = path.join(
     process.env.XDG_STATE_HOME || path.join(os.homedir(), '.local/state'),
     'opencode/service.json',
   ),
-  pid = process.pid,
+  alive = defaultAlive,
   fetcher = fetch,
 } = {}) {
   return async (method, pathname, { query = {}, body, signal } = {}) => {
@@ -39,7 +49,8 @@ export function nativeTransport({
     }
     const url = new URL(service.url);
     if (
-      service.pid !== pid ||
+      !Number.isInteger(service.pid) ||
+      service.pid <= 0 ||
       url.protocol !== 'http:' ||
       url.hostname !== '127.0.0.1' ||
       !url.port ||
@@ -49,9 +60,15 @@ export function nativeTransport({
       url.search ||
       url.hash ||
       typeof service.password !== 'string' ||
-      !service.password
+      !service.password ||
+      (service.id !== undefined && (typeof service.id !== 'string' || !service.id))
     )
       throw Error('OpenCode service identity mismatch');
+    if (alive(service.pid) !== true)
+      throw Error(
+        `Stale OpenCode service discovery file (pid ${service.pid} not running); ` +
+          `restart opencode serve --service or remove ${serviceFile}`,
+      );
     url.pathname = pathname;
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     const response = await fetcher(url, {
