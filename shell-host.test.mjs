@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureShellRuntime } from './shell-host.mjs';
+import { captureShellRuntime, executableResolver } from './shell-host.mjs';
 const event = (extra = {}) => ({
   command: 'cat file',
   cwd: '/fixture',
@@ -49,4 +49,16 @@ test('equal concurrent commands with different environments remain ambiguous', (
   host.begin('c', e.command, e.cwd);
   host.capture(e);
   assert.ok(host.get(e.command, e.cwd, 'c'));
+});
+
+test('which is a zsh builtin only in shell execution, not in direct subprocesses or Bash', async () => {
+  const environment = { PATH: '/approval-fixture-no-executables' };
+  const zsh = executableResolver(environment, {}, { shell: '/bin/zsh' });
+  assert.equal(await zsh.resolveExecutable('which'), 'builtin:which');
+  assert.equal(await zsh.resolveExecutable('which', false), null);
+  assert.equal(
+    await executableResolver(environment, {}, { shell: '/bin/bash' }).resolveExecutable('which'),
+    null,
+  );
+  assert.equal(await executableResolver(environment, {}).resolveExecutable('which'), null);
 });

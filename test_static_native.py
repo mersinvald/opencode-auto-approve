@@ -38,6 +38,10 @@ def main():
     python = Path('/usr/bin/python3').resolve()
     policy['staticShell']['executables'] = [{'name': 'python3', 'path': '/usr/bin/python3',
         'realpath': str(python), 'sha256': hashlib.sha256(python.read_bytes()).hexdigest()}]
+    # Some Linux distributions provide which as a script. Pin the fixture lookup tool.
+    which = Path(shutil.which('which')).resolve()
+    policy['staticShell']['executables'].append({'name': 'which', 'path': shutil.which('which'),
+        'realpath': str(which), 'sha256': hashlib.sha256(which.read_bytes()).hexdigest()})
     if len(sys.argv) >= 2:
         supplied = json.loads(Path(sys.argv[1]).read_text())
         if 'staticShell' in supplied:
@@ -56,6 +60,20 @@ def main():
     policy['staticPython'] = {'enabled': True, 'parser': {**python_pin(config/'review/python-parser/parse.py'),
                             'interpreter': python['interpreter']}, 'environments': [python]}
     policy['staticShell']['executables'].append({**python['interpreter'], 'name': Path(python_exe).name})
+    lint = repo/'lint-fixture.py'
+    lint.write_text("from pathlib import Path\nimport sys\nfor name in sys.argv[1:]: print(len(Path(name).read_text()))\n")
+    policy['staticShell'].setdefault('helpers', []).append({'path':str(lint),'realpath':str(lint),'sha256':hashlib.sha256(lint.read_bytes()).hexdigest()})
+    lint_inputs=[]
+    for i in range(4):
+        item=repo/f'lint-input-{i}.py';item.write_text('# data only\n'*4000);lint_inputs.append(str(item))
+    large_helper=repo/'large-helper.py';large_helper.write_text('# oversized helper\n'*2000)
+    worktree=base/'lint-worktree';worktree.mkdir()
+    worktree_inputs=[]
+    for item in lint_inputs:
+        target=worktree/Path(item).name;shutil.copyfile(item,target);worktree_inputs.append(str(target))
+    policy['grantRules'].extend([
+        {'operation':op,'target':str(worktree),'targetType':'directory','mode':'allow'}
+        for op in ['files.access','files.read']])
     policy.setdefault('grantRules', []).extend([
         {'operation': 'python.import', 'target': name, 'targetType': 'exact', 'mode': 'allow'}
         for name in ['pathlib', 'subprocess', 'hashlib']])
@@ -83,7 +101,7 @@ export default {id:'local.approval-review', async setup(ctx) {
    const name=e.metadata.fixtureRun;
    log({kind:'start',name,available:!!nativeShell});
    if (!nativeShell) return;
-   void nativeShell.execute({command:e.metadata.command,workdir:""" + json.dumps(str(repo)) + """,timeout:1000},
+   void nativeShell.execute({command:e.metadata.command,workdir:e.metadata.workdir ?? """ + json.dumps(str(repo)) + """,timeout:1000},
      {sessionID:e.sessionID,agent:'build',messageID:'msg_tool_'+name,id:'call_'+name,progress:async()=>{}})
      .then(result=>log({kind:'finished',name}), error=>log({kind:'failed',name,error:String(error)}));
  });
@@ -128,6 +146,13 @@ export default {id:'local.approval-review', async setup(ctx) {
                  ('sed_reads',"sed -nE -e '1, 2 p' -e '/hello/p' file; sed 's|hello|hi|g; /world/d' file"),
                  ('sed_edits',"sed -i.bak 's/before/after/' sed-edit"),
                  ('status_path','git --no-pager status --short --untracked-files=all -- file'),
+                 ('diff_path','git --no-pager diff --stat tests/test_phase1_one.py; git diff --stat -- tests/test_phase1_one.py'),
+                 ('which_lookup',f"cd '{repo}' && ls .venv/bin/python 2>/dev/null; which pytest; ls tests 2>/dev/null | head; cat file | grep -A5 hello"),
+                 ('pinned_lint_inputs',f"'{python_exe}' -I -S -B '{lint}' {' '.join(lint_inputs)} 2>&1 | tail -20"),
+                 ('bare_lint_worktree',f"python3 -I -S -B '{lint}' {' '.join(Path(p).name for p in worktree_inputs)}"),
+                 ('preparation_missing',f"'{python_exe}' -I -S -B '{repo}/missing-helper.py'"),
+                 ('preparation_large',f"'{python_exe}' -I -S -B '{large_helper}'"),
+                 ('preparation_directory',f"python3 -I -S -B '{large_helper}'"),
                  ('array_read','READ=(cat file); "${READ[@]}" | grep -A1 hello'),
                  ('pytest_glob','PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m pytest -q -p no:cacheprovider tests/test_phase1_*.py'),
                  ('sqlite_schema','sqlite3 -safe -readonly -init /dev/null fixture.db ".schema messages"'),
@@ -138,22 +163,41 @@ export default {id:'local.approval-review', async setup(ctx) {
                  ('python_process', f"'{python_exe}' -I -S -B - <<'PY'\nimport subprocess\nsubprocess.run(['/bin/cat','file'],check=True)\nsubprocess.run('cat file | wc -l',shell=True,check=True)\nPY"),
                  ('pytest_missing', 'cd tests\n/usr/bin/python3 -m pytest test_phase1_one.py\nprintf done'),
                  ('fallback',"if grep -q hello file; then cat file; else unmodeled_fixture; fi")]
-        if policy['staticShell'].get('helpers'):
+        if len(sys.argv) >= 2 and policy['staticShell'].get('helpers'):
             lint = policy['staticShell']['helpers'][0]['path']
             cases[2:2] = [('expanded_reads', 'head -20 file; shasum -a 256 file; git --no-pager status --short'),
                           ('pinned_lint', f"python3 -I -S -B '{lint}' file")]
             if any(p['name']=='jq' for p in policy['staticShell']['executables']):
                 cases.insert(-2,('sqlite_json',"sqlite3 -safe -readonly -init /dev/null fixture.db \"SELECT data FROM messages WHERE id='msg_one';\" | jq ."))
         for name, command in cases:
+            workdir=worktree if name in ('bare_lint_worktree','preparation_directory') else repo
             model_count=len([e for e in events() if e['kind']=='model'])
             data=copy.deepcopy(template); sid='ses_static_'+name; stamp=int(time.time()*1000)
             data['info'].update(id=sid,title=name)
             data['messages']=[{'id':'msg_user_'+name,'type':'user','text':'Read the fixture files for this task.','time':{'created':stamp}},
               {'id':'msg_tool_'+name,'type':'assistant','agent':'build','model':policy['model'],'time':{'created':stamp,'completed':stamp},'finish':'stop',
-               'content':[{'type':'tool','id':'call_'+name,'name':'shell','state':{'status':'completed','input':{'command':command,'workdir':str(repo)},'content':[{'type':'text','text':'Fixture source context'}]},'time':{'created':stamp,'completed':stamp}}]}]
+               'content':[{'type':'tool','id':'call_'+name,'name':'shell','state':{'status':'completed','input':{'command':command,'workdir':str(workdir)},'content':[{'type':'text','text':'Fixture source context'}]},'time':{'created':stamp,'completed':stamp}}]}]
             api.call('POST','/api/session/import',data)
-            api.call('POST',f'/api/session/{sid}/permission',{'action':'execute','resources':['fixture'],'metadata':{'fixtureRun':name,'command':command}})
-            if name not in ('fallback','pytest_missing'):
+            api.call('POST',f'/api/session/{sid}/permission',{'action':'execute','resources':['fixture'],'metadata':{'fixtureRun':name,'command':command,'workdir':str(workdir)}})
+            if name.startswith('preparation_'):
+                wait(lambda:any(r['sessionID']==sid and r['code']=='preparation_failed' for r in records()))
+                row=next(r for r in records() if r['sessionID']==sid and r['code']=='preparation_failed')
+                assert row['preview']!='[command unavailable]',row
+                assert row['details']['status']=='stored',row
+                detail=json.loads((base/'audit'/row['details']['path']).read_text())['data']
+                assert detail['request']['tool']['input']['command']==command,detail['request']
+                expected='helper_source_unavailable' if name=='preparation_missing' else 'helper_source_too_large'
+                assert detail['diagnostics']['failure']['code']==expected,detail['diagnostics']
+                assert any(h['status']=='failed' and h['path'] in command and h['code']==expected for h in detail['helpers']),detail['helpers']
+                if name=='preparation_directory':
+                    assert row['action']=='shell',row
+                    directory=next(r for r in records() if r['sessionID']==sid and r['action']=='external_directory')
+                    assert directory['code']=='grant_rule' and directory['proposed']=='allow',directory
+                assert len([e for e in events() if e['kind']=='model'])==model_count
+                pending=api.call('GET',f'/api/session/{sid}/permission');assert len(pending)==1
+                api.call('POST',f'/api/session/{sid}/permission/{pending[0]["id"]}/reply',{'reply':'reject'})
+                checks.append({'case':name,'code':row['code'],'commandAndFailureStored':True})
+            elif name not in ('fallback','pytest_missing'):
                 wait(lambda:any(e['kind']=='finished' and e['name']==name for e in events()))
                 row=next(r for r in records() if r['sessionID']==sid and r['code']=='grant_rule' and r['action']=='shell')
                 assert row['details']['status']=='stored',row.get('details')
@@ -173,6 +217,21 @@ export default {id:'local.approval-review', async setup(ctx) {
                     for filename in ['sed-edit','sed-edit.bak']:
                         assert any(g['operation']=='files.write' and g['target']==str(repo/filename) for g in grants),grants
                 if name=='probe': assert detail['data']['diagnostics']['static']['analysis']['complete']
+                if name=='which_lookup':
+                    grants=detail['data']['diagnostics']['static']['analysis']['grants']
+                    assert any(g['operation']=='shell.lookup' and g['target']=='pytest' for g in grants),grants
+                    assert not any(g['operation']=='tests.run' for g in grants),grants
+                if name in ('pinned_lint_inputs','bare_lint_worktree'):
+                    grants=detail['data']['diagnostics']['static']['analysis']['grants']
+                    assert any(g['operation']=='tools.lint' for g in grants),grants
+                    expected_inputs=worktree_inputs if name=='bare_lint_worktree' else lint_inputs
+                    assert all(any(g['operation']=='files.read' and g['target']==p for g in grants) for p in expected_inputs),grants
+                    assert [h['path'] for h in detail['data']['helpers']]==[str(repo/'lint-fixture.py')],detail['data']['helpers']
+                    if name=='bare_lint_worktree':
+                        directory=next(r for r in records() if r['sessionID']==sid and r['action']=='external_directory')
+                        assert directory['code']=='grant_rule' and directory['proposed']=='allow',directory
+                        directory_detail=json.loads((base/'audit'/directory['details']['path']).read_text())['data']
+                        assert not directory_detail.get('helpers'),directory_detail.get('helpers')
                 checks.append({'case':name,'code':row['code'],'elapsedMs':row['elapsedMs']})
             else:
                 wait(lambda:any(r['sessionID']==sid and r['code']=='model_escalation' for r in records()))

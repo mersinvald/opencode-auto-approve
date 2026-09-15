@@ -72,6 +72,12 @@ The installer writes `approval-policy.json` with private file permissions. You c
 | `modelGrants.enabled` | Whether the model may save rules                                   |
 | `staticShell`         | Parser identity, inspected executable pins, and Beads writer roles |
 
+For an isolated lint invocation, helper discovery checks the configured interpreter and helper hashes. Files passed to that verified helper are lint inputs. Their `.py` extension does not make them executable helpers. They retain their file-read permission checks. Unknown runners, changed hashes, and non-isolated invocations retain helper-source review.
+
+A bare `python3` command uses the PATH captured for that shell invocation and its working directory. The gate verifies the shell environment and the resolved interpreter. A missing capture, an untrusted PATH entry, or a preceding command that can change lookup prevents this shortcut. Directory-access requests check directory grants separately. They do not read helper sources for the later shell request, which retains its own checks.
+
+Preparation failures retain the captured command and helper diagnostics in the detailed audit record. This includes the helper path and underlying error code.
+
 Example global rule:
 
 ```json

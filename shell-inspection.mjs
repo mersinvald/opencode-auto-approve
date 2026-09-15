@@ -127,10 +127,12 @@ export function gitInspection(operation, args) {
     a.splice(cut);
     if (!paths.length) return null;
   }
-  if (operation === 'status') {
-    // Git accepts literal status pathspecs without the optional separator.
+  if (['status', 'diff'].includes(operation)) {
+    // Git accepts literal pathspecs without --. Keep diff revisions in the
+    // option/ref validation; all extracted paths still undergo scope checks.
     for (let i = 0; i < a.length; ) {
-      if (!a[i].startsWith('-')) paths.push(a.splice(i, 1)[0]);
+      if (!a[i].startsWith('-') && (operation === 'status' || !ref(a[i])))
+        paths.push(a.splice(i, 1)[0]);
       else i++;
     }
   }
@@ -171,7 +173,7 @@ export function gitInspection(operation, args) {
         (x) => ref(x) || /^-[0-9]{1,3}$/.test(x) || ['--oneline', '--format=%H %s'].includes(x),
       )) ||
     (operation === 'diff' &&
-      a.length &&
+      (a.length || paths.length) &&
       a.every(
         (x) =>
           ref(x) ||

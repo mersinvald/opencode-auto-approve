@@ -273,7 +273,7 @@ const modeName = (value) =>
 const shortSession = (id) =>
   safeText(id, 160).length > 16 ? '…' + safeText(id, 160).slice(-12) : safeText(id);
 const eventTone = (record) =>
-  ({ allow: 'green', deny: 'red', ask: 'amber' })[record.applied] ?? 'cyan';
+  ({ allow: 'green', deny: 'red', ask: 'red' })[record.applied] ?? 'cyan';
 const grantTone = (mode) => ({ allow: 'green', ask: 'amber', dynamic: 'cyan' })[mode];
 
 export function formatDetailedRecord(record, options) {

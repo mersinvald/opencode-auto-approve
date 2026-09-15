@@ -66,9 +66,15 @@ export function createApprovalPlugin({ generate: override } = {}) {
         return config;
       };
       if ((await readPolicy()).mode === 'off') return;
-      async function prepare(event, signal) {
+      async function prepare(event, signal, partial = {}) {
         const config = await readPolicy(),
           chain = [];
+        Object.assign(partial, {
+          config,
+          tool: sourceTool(event, captured, []),
+          scope: { directory: ctx.location.directory },
+          helpers: [],
+        });
         let id = event.sessionID;
         while (id && chain.length < 8) {
           if (chain.some((c) => c.info.id === id)) throw Error('Parent cycle');
@@ -93,6 +99,7 @@ export function createApprovalPlugin({ generate: override } = {}) {
             captured,
             await ctx.session.context({ sessionID: event.sessionID }, { signal }),
           );
+        partial.tool = tool;
         const scratch = await scratchDirectory(config.scratchRoot, event.sessionID);
         const readableAncestorScratch = info.parentID
           ? await ancestorScratchDirectories(ctx.session, info, config.scratchRoot, signal)
@@ -117,20 +124,33 @@ export function createApprovalPlugin({ generate: override } = {}) {
           directory: scope.directory,
           scratch,
         };
+        Object.assign(partial, { scope, request, permissions });
+        const runtime =
+          host.get(
+            tool?.input?.command,
+            tool?.input?.workdir || tool?.input?.cwd || scope.directory,
+            invocation(event),
+          ) ?? pendingRuntime.get(fingerprint(event));
         // Exact helper grants include source bytes before any saved rule can match.
-        request.scripts = await scriptEvidence(tool, scope, config);
+        request.scripts = await scriptEvidence(tool, scope, config, partial.helpers, {
+          runtime,
+          action: event.action,
+        });
         await bounded(() => queue.settleRules(info.projectID), 8000, signal);
         const state = await store.import(
           info.projectID,
           permissions.saved,
           await legacyGrants(policyFile),
         );
-        const runtime = host.get(
-          tool?.input?.command,
-          tool?.input?.workdir || tool?.input?.cwd || scope.directory,
-          invocation(event),
-        );
-        return { config, scope, request, tool, state, permissions, runtime };
+        return Object.assign(partial, {
+          config,
+          scope,
+          request,
+          tool,
+          state,
+          permissions,
+          runtime,
+        });
       }
       const record = (event, p, result, diagnostics, model = false, elapsedMs = 0) =>
         auditRecord({
@@ -431,10 +451,10 @@ export function createApprovalPlugin({ generate: override } = {}) {
             }
             return;
           }
-          let p;
+          let p = {};
           const started = Date.now();
           try {
-            p = await prepare(event, controller.signal);
+            p = await prepare(event, controller.signal, p);
             if (p.config.mode === 'off') return;
             const checked = await bounded(
               (s) => gate(p.request, { ...p, signal: s }),
@@ -498,28 +518,33 @@ export function createApprovalPlugin({ generate: override } = {}) {
                 stage: 'static_gate',
                 reason: event.message,
               };
-              const row = p
-                ? record(
-                    event,
-                    p,
-                    result,
-                    { failure: { stage: 'static_gate', message: event.message } },
-                    false,
-                    Date.now() - started,
-                  )
-                : {
-                    version: 3,
-                    time: new Date().toISOString(),
-                    sessionID: event.sessionID,
-                    action: event.action,
-                    preview: requestPreview(event),
-                    original: 'ask',
-                    proposed: 'ask',
-                    applied: 'ask',
-                    mode: config.mode,
-                    elapsedMs: Date.now() - started,
-                    ...result,
-                  };
+              const tool = p?.tool ?? sourceTool(event, captured, []);
+              const row = auditRecord({
+                event,
+                tool,
+                request: p?.request ?? {
+                  action: event.action,
+                  resources: event.resources,
+                  effect: event.effect,
+                  tool,
+                  directory: ctx.location.directory,
+                },
+                scope: p?.scope ?? { directory: ctx.location.directory },
+                config,
+                original: 'ask',
+                applied: 'ask',
+                mode: config.mode,
+                elapsedMs: Date.now() - started,
+                result,
+                diagnostics: {
+                  failure: {
+                    stage: 'static_gate',
+                    code: error.approvalCode ?? error.code,
+                    message: event.message,
+                  },
+                  helpers: p?.helpers ?? [],
+                },
+              });
               await writeAudit(config.auditRoot, row);
             } catch {
               /* The native dialog remains available when audit storage is unavailable. */

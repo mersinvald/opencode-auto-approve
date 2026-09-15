@@ -229,6 +229,17 @@ export async function extractAction(request, { scope, config, runtime, permissio
         if (!executable) fail('unverified_executable');
         if (!executable.startsWith('builtin:')) authority.add(executable);
         if (['true', 'false', 'pwd'].includes(name) && !args.length) return;
+        if (name === 'which') {
+          const names = [...args];
+          while (names[0] === '-a') names.shift();
+          if (names[0] === '--') names.shift();
+          if (!names.length || names.some((x) => !/^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(x)))
+            fail('lookup_arguments');
+          // Locate command names only. Do not run or read the discovered programs.
+          for (const query of names) add('shell.lookup', query, 'exact');
+          commands.at(-1).lookup = { names, executesTarget: false };
+          return;
+        }
         if (name === 'set') {
           if (
             args.length &&

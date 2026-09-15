@@ -11,6 +11,7 @@ The [global rule generator](../grant-gate.mjs) is the source of truth. The [mode
 | Scope                                      | Default permissions                                                            |
 | ------------------------------------------ | ------------------------------------------------------------------------------ |
 | An ordinary `AGENTS.md` file, anywhere     | Read instructions through `instructions.read`.                                 |
+| Executable names on `PATH`                 | Locate names with `shell.lookup`. This does not permit program execution.      |
 | Current session directory and its children | Access, read, list, read-only Git inspection, and supported stream operations. |
 | Current task scratch directory             | The same reads, plus file writes and deletion.                                 |
 | Verified ancestor scratch directories      | Read access for shared task results. No inherited write permission.            |
@@ -32,6 +33,10 @@ git diff --stat
 ```
 
 Shell examples require the parser and verified executable identities. Unsupported syntax, flags, or runtime settings fall back to model review.
+
+`which pytest` requests `shell.lookup` for the name `pytest`. The parser supports command names, multiple names, `-a`, and the `--` separator. It does not run the lookup or the named program during approval. A missing program is also a lookup. Output redirects and later commands require their own grants.
+
+The parser verifies the external lookup executable or the Zsh builtin. Custom wrappers, path operands, and other flags require model review.
 
 A path rule does not cover a similarly named sibling directory. A grant for `/work/app` does not cover `/work/app-backup`.
 

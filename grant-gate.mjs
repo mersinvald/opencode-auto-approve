@@ -35,6 +35,7 @@ export function globalRules(config, scope) {
         provenance: { source: 'global defaults' },
       });
   add('instructions.read', '*', 'any');
+  add('shell.lookup', '*', 'any');
   for (const root of [
     scope.directory,
     scope.scratch,

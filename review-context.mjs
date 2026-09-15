@@ -4,8 +4,13 @@ import { mkdir, lstat, realpath, open, readFile, readdir, unlink } from 'node:fs
 import path from 'node:path';
 import { canonical, within, sensitivePath, digest, validateConfig } from './policy.mjs';
 import { auditRecord, decisionReason } from './audit.mjs';
-import { helperReferences, inlineHelperSources } from './shell-context.mjs';
+import {
+  helperReferences,
+  inlineHelperSources,
+  isolatedPythonInvocations,
+} from './shell-context.mjs';
 import { permissionEvidence } from './native-permissions.mjs';
+import { sha256, attestRuntime } from './shell-host.mjs';
 const scopeContext = (rootSessionID, users) => ({ rootSessionID, userHash: digest(users) });
 
 class ReviewFailure extends Error {
@@ -225,12 +230,65 @@ async function readHelperSource(target, maxChars) {
   }
 }
 
-export async function scriptEvidence(tool, scope, config, diagnostics = []) {
+export async function scriptEvidence(
+  tool,
+  scope,
+  config,
+  diagnostics = [],
+  { runtime, action = 'shell' } = {},
+) {
+  // A directory request authorizes traversal, not the originating shell command.
+  if (action !== 'shell') return [];
   const command = tool?.input?.command;
   if (typeof command !== 'string') return [];
   const scripts = [];
   const inline = inlineHelperSources(command);
-  for (const name of helperReferences(command)) {
+  const references = helperReferences(command),
+    dataInvocations = [];
+  // A matching name alone cannot prove that later .py arguments are lint inputs.
+  // Require the exact interpreter and helper identities before omitting their bodies.
+  const verified = async (pin) => {
+    try {
+      const resolved = await realpath(pin.path),
+        stat = await lstat(resolved);
+      return (
+        resolved === pin.realpath &&
+        stat.isFile() &&
+        !(stat.mode & 0o022) &&
+        sha256(await readFile(resolved)) === pin.sha256
+      );
+    } catch {
+      return false;
+    }
+  };
+  let host;
+  for (const invocation of isolatedPythonInvocations(command)) {
+    const helper = config.staticShell?.helpers?.find(
+      (pin) => pin.path === invocation.helper && references.includes(pin.path),
+    );
+    if (!helper) continue;
+    let trusted = false;
+    if (path.isAbsolute(invocation.interpreter)) {
+      const pin = config.staticShell?.executables?.find(
+        (pin) => pin.path === invocation.interpreter || pin.realpath === invocation.interpreter,
+      );
+      trusted = !!pin && (await verified(pin));
+    } else if (
+      invocation.lookupSafe &&
+      !invocation.interpreter.includes('/') &&
+      runtime?.command === command &&
+      runtime.cwd === (tool.input.workdir || tool.input.cwd || scope.directory)
+    ) {
+      try {
+        host ??= await attestRuntime(runtime, config.staticShell);
+        trusted = !!(await host.resolveExecutableIdentity(invocation.interpreter, false));
+      } catch {
+        // Missing or untrusted runtime evidence must not fall back to process.env.
+      }
+    }
+    if (trusted && (await verified(helper))) dataInvocations.push(invocation);
+  }
+  for (const name of helperReferences(command, { dataInvocations })) {
     const entry = {
       reference: name,
       cwd: tool.input.workdir || tool.input.cwd || scope.directory,

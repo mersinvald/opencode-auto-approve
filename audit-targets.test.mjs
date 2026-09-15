@@ -5,7 +5,17 @@ const sandboxWrapper =
     : '';
 
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, lstat, chmod, symlink, open } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  lstat,
+  chmod,
+  symlink,
+  open,
+  realpath,
+} from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { gate } from './grant-gate.mjs';
@@ -26,6 +36,12 @@ await writeFile(repo + '/contracts/common.json', '{"$ref":"common.json"}\n');
 await writeFile(repo + '/contracts/copy.json', '{"$ref":"common.json"}\n');
 execFileSync('/usr/bin/git', ['init', '-q', repo]);
 const executables = [];
+executables.push({
+  name: 'which',
+  path: '/usr/bin/which',
+  realpath: await realpath('/usr/bin/which'),
+  sha256: sha256(await readFile('/usr/bin/which')),
+});
 for (const name of ['bd', 'jq']) {
   const file = base + '/' + name;
   // Any accidental execution leaves evidence; these programs are only parsed.
@@ -149,10 +165,69 @@ test('show still rejects external diff and Git still rejects fsmonitor execution
     ]);
     try {
       await incomplete('git show --stat HEAD');
+      await incomplete('git --no-pager diff --stat contracts/common.json');
     } finally {
       execFileSync('/usr/bin/git', ['-C', repo, 'config', '--unset', setting]);
     }
   }
+});
+
+test('Git diff literal paths work without -- and retain scoped read permissions', async () => {
+  await mkdir(repo + '/src/accountant/contracts', { recursive: true });
+  await writeFile(repo + '/src/accountant/contracts/schema.py', '# fixture\n');
+  const command = 'git --no-pager diff --stat src/accountant/contracts/schema.py';
+  const first = await allowed(command);
+  const separated = await allowed(command.replace('--stat ', '--stat -- '));
+  const effects = (result) => result.analysis.grants.map((g) => [g.operation, g.target]);
+  assert.deepEqual(effects(first), effects(separated));
+  assert.ok(first.analysis.complete);
+  assert.ok(first.analysis.grants.some((g) => g.operation === 'git.read' && g.target === repo));
+  assert.ok(
+    first.analysis.grants.some(
+      (g) =>
+        g.operation === 'files.list' && g.target === repo + '/src/accountant/contracts/schema.py',
+    ),
+  );
+  assert.ok(!first.analysis.grants.some((g) => /\.(write|delete)$/.test(g.operation)));
+  for (const args of [
+    'diff contracts/common.json',
+    'diff -- contracts/common.json',
+    'diff --stat HEAD contracts/common.json contracts/copy.json',
+    'diff --check contracts/common.json',
+    'diff --cached --name-only contracts/common.json',
+  ])
+    await allowed('git ' + args);
+  assert.equal(
+    (await inspect(command, { state: { rules: [rule('git.read', repo, 'ask')] } })).decision,
+    'ask',
+  );
+  assert.equal(
+    (await inspect(command, { state: { rules: [rule('git.read', repo, 'dynamic')] } })).decision,
+    'dynamic',
+  );
+  assert.equal(
+    (await inspect(command, { state: { rules: [rule('files.list', repo + '/src', 'ask')] } }))
+      .decision,
+    'ask',
+  );
+});
+
+test('Git diff positional paths do not hide writes, external execution, or path escapes', async () => {
+  await symlink(scratch, repo + '/diff-escape');
+  for (const args of [
+    'diff --stat --output=' + scratch + '/output contracts/common.json',
+    'diff --stat contracts/common.json --output=' + scratch + '/output',
+    'diff --stat --ext-diff contracts/common.json',
+    'diff --stat --textconv contracts/common.json',
+    'diff --stat --no-index contracts/common.json contracts/copy.json',
+    'diff --stat ../outside',
+    'diff --stat diff-escape',
+    "diff --stat ':(top)contracts'",
+    "diff --stat 'contracts/*'",
+    'stash --include-untracked -- contracts/common.json',
+    'checkout HEAD -- contracts/common.json',
+  ])
+    await incomplete('git --no-pager ' + args);
 });
 
 test('inspection filters normalize data programs and flag arguments', async () => {
@@ -176,6 +251,70 @@ test('inspection filters normalize data programs and flag arguments', async () =
     'grep -r ref .',
   ])
     await incomplete(command);
+});
+
+test('which derives lookup grants and continues through the remaining reads', async () => {
+  const command = `cd '${repo}/contracts' && ls .venv/bin/python 2>/dev/null; which pytest; ls .. 2>/dev/null | head; cat common.json | grep -A5 ref`;
+  const result = await allowed(command, { state: { rules: [rule('files.list', base)] } });
+  assert.ok(result.analysis.complete);
+  assert.ok(
+    result.analysis.grants.some((g) => g.operation === 'shell.lookup' && g.target === 'pytest'),
+  );
+  assert.ok(
+    result.analysis.grants.some(
+      (g) => g.operation === 'files.read' && g.target === repo + '/contracts/common.json',
+    ),
+  );
+  assert.ok(result.analysis.commands.some((c) => c.argv[0] === 'grep'));
+  assert.ok(!result.analysis.grants.some((g) => g.operation === 'tests.run'));
+  for (const command of [
+    'which -a python3 pytest',
+    'which -- pytest',
+    'which approval_nonexistent_fixture',
+  ])
+    await allowed(command);
+  const lookupRule = {
+    operation: 'shell.lookup',
+    target: 'pytest',
+    targetType: 'exact',
+    mode: 'ask',
+    scope: 'project',
+    authority: 'user',
+  };
+  assert.equal((await inspect('which pytest', { state: { rules: [lookupRule] } })).decision, 'ask');
+  assert.equal(
+    (await inspect('which pytest', { state: { rules: [{ ...lookupRule, mode: 'dynamic' }] } }))
+      .decision,
+    'dynamic',
+  );
+});
+
+test('which does not authorize wrappers, substitutions, redirects, or later execution', async () => {
+  for (const command of [
+    'which --read-functions pytest',
+    'which --version',
+    'which',
+    'which ../outside',
+    'which "$(touch marker)"',
+    '"$(which pytest)" --version',
+    'which pytest; pytest',
+  ])
+    await incomplete(command);
+  const write = await inspect(`which pytest > '${scratch}/lookup.txt'`, {
+    scope: { ...scope, scratch: undefined },
+  });
+  assert.equal(write.decision, 'dynamic');
+  assert.ok(write.analysis.grants.some((g) => g.operation === 'files.write'));
+  await writeFile(base + '/which', '#!/bin/sh\nprintf unexpected > ' + base + '/WHICH_EXECUTED\n', {
+    mode: 0o700,
+  });
+  try {
+    const wrapper = await incomplete('which pytest');
+    assert.equal(wrapper.analysis.reason, 'unverified_executable');
+    assert.ok(!(await lstat(base + '/WHICH_EXECUTED').catch(() => null)));
+  } finally {
+    await (await import('node:fs/promises')).unlink(base + '/which');
+  }
 });
 
 test('argumentless echo is complete and does not stop later command analysis', async () => {

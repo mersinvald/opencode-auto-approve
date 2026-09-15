@@ -35,9 +35,9 @@ export default {
     const color = (effect) =>
       effect === 'allow'
         ? ctx.theme.text.feedback.success.default
-        : effect === 'ask'
+        : effect === 'warning'
           ? ctx.theme.text.feedback.warning.default
-          : effect === 'deny'
+          : effect === 'deny' || effect === 'ask'
             ? ctx.theme.text.feedback.error.default
             : ctx.theme.text.subdued;
     const text = (value, fg = ctx.theme.text.default, bold = false) =>
@@ -120,12 +120,12 @@ export default {
               flexDirection: 'column',
               flexShrink: 0,
               border: ['left'],
-              borderColor: color('ask'),
+              borderColor: color('warning'),
               paddingLeft: 1,
               marginBottom: 1,
             },
             [
-              text('WARNING · Audit storage', color('ask'), true),
+              text('WARNING · Audit storage', color('warning'), true),
               muted(new Date(record.time).toLocaleString()),
               text(record.reason),
             ],
@@ -188,7 +188,7 @@ export default {
               record.applied
                 ? `${record.mode.toUpperCase()} · review ${record.proposed.toUpperCase()}, native ${decision}`
                 : `Proposed ${record.proposed.toUpperCase()} · final decision not stored`,
-              color('ask'),
+              color('warning'),
             ),
           );
         insert(
@@ -321,7 +321,7 @@ export default {
                 get when() {
                   return notice();
                 },
-                children: () => text(notice, color('ask')),
+                children: () => text(notice, color('warning')),
               }),
             ]),
           ]),

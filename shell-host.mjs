@@ -142,16 +142,20 @@ export async function attestRuntime(runtime, settings) {
     }
   }
   return {
-    ...executableResolver(runtime.env, settings),
+    ...executableResolver(runtime.env, settings, { shell: shellPath }),
     fingerprint: digest({ runtime, shellPath }),
   };
 }
 
-export function executableResolver(environment, settings) {
+export function executableResolver(environment, settings, { shell } = {}) {
   if (Object.entries(environment).some(([k, v]) => unsafeEnvironment(k, v)))
     throw Error('shell_environment');
   const resolveExecutable = async (name, useBuiltins = true) => {
-    if (useBuiltins && builtins.has(name)) return { path: name, realpath: 'builtin:' + name };
+    if (
+      useBuiltins &&
+      (builtins.has(name) || (name === 'which' && path.basename(shell ?? '') === 'zsh'))
+    )
+      return { path: name, realpath: 'builtin:' + name };
     const search = name.includes('/')
       ? [name]
       : (environment.PATH ?? '').split(':').map((p) => path.join(p, name));

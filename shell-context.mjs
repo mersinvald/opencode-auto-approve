@@ -98,14 +98,56 @@ export function commandSegments(command) {
   return result;
 }
 
-export function helperReferences(command) {
+export function isolatedPythonInvocations(command) {
+  const result = [];
+  let lookupSafe = !/[$`]/.test(command);
+  for (const [segmentIndex, segment] of commandSegments(command).entries()) {
+    let start = 0;
+    while (/^[A-Za-z_][A-Za-z_0-9]*=/.test(segment[start]?.text ?? '')) start++;
+    const interpreter = segment[start]?.text;
+    let args = start + 1;
+    while (/^-[ISB]+$/.test(segment[args]?.text ?? '')) args++;
+    if (
+      /^(?:[^\n]*\/)?python(?:3(?:\.\d+)?)?$/.test(interpreter ?? '') &&
+      ['I', 'S', 'B'].every((flag) =>
+        segment.slice(start + 1, args).some((token) => token.text?.includes(flag)),
+      ) &&
+      segment[args]?.text
+    ) {
+      result.push({
+        interpreter,
+        helper: segment[args].text,
+        segmentIndex,
+        lookupSafe: lookupSafe && start === 0,
+      });
+    }
+    // A preceding cd cannot change an absolute PATH search. Other commands and
+    // assignments may change resolution, so their following invocations need review.
+    lookupSafe &&=
+      start === 0 && interpreter === 'cd' && segment.length === 2 && !!segment[1]?.text;
+  }
+  return result;
+}
+
+export function helperReferences(command, { dataInvocations = [] } = {}) {
   const compound = /[\n\r`$;&|<>]/.test(command);
   const references = [];
-  for (const segment of commandSegments(command)) {
+  for (const [segmentIndex, segment] of commandSegments(command).entries()) {
     let start = 0;
     while (/^[A-Za-z_][A-Za-z_0-9]*=/.test(segment[start]?.text ?? '')) start++;
     let args = start + 1;
     while (/^-[ISB]+$/.test(segment[args]?.text ?? '')) args++;
+    const isolated = ['I', 'S', 'B'].every((flag) =>
+      segment.slice(start + 1, args).some((token) => token.text?.includes(flag)),
+    );
+    const dataArguments =
+      isolated &&
+      dataInvocations.some(
+        (item) =>
+          item.interpreter === segment[start]?.text &&
+          item.helper === segment[args]?.text &&
+          (item.segmentIndex === undefined || item.segmentIndex === segmentIndex),
+      );
     const pytest =
       /^(?:[^\n]*\/)?python(?:3(?:\.\d+)?)?$/.test(segment[start]?.text ?? '') &&
       segment[args]?.text === '-m' &&
@@ -116,6 +158,8 @@ export function helperReferences(command) {
       // The shell adapter expands them into tests.run grants. This skip grants
       // no authority; unsupported runners or options still need model review.
       if (pytest && index > args + 1) continue;
+      // Only a verified interpreter and lint helper can classify these as data.
+      if (dataArguments && index > args) continue;
       // An output filename is not an existing helper input.
       if (['>', '>>'].includes(segment[index - 1]?.op)) continue;
       const name = token.text.replace(/^[A-Za-z_][A-Za-z_0-9]*=/, '');

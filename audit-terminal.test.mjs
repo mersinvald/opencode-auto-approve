@@ -76,7 +76,7 @@ test('details wrap within narrow and wide terminals without losing grant or tran
 test('status and grant colors are semantic; untrusted content cannot inject terminal controls', () => {
   for (const [applied, label, code] of [
     ['allow', 'APPROVED', 32],
-    ['ask', 'APPROVAL NEEDED', 33],
+    ['ask', 'APPROVAL NEEDED', 31],
     ['deny', 'DENIED', 31],
   ]) {
     const text = formatDetailedRecord({ ...row, applied, detail: { data } }, { color: 'always' });

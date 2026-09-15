@@ -20,7 +20,10 @@ export async function reviewDynamic(
   try {
     return await bounded(
       async (signal) => {
-        request.scripts = await scriptEvidence(request.tool, scope, config, diagnostics.helpers);
+        request.scripts = await scriptEvidence(request.tool, scope, config, diagnostics.helpers, {
+          runtime,
+          action: request.action,
+        });
         const checked = await gate(request, { scope, config, state, permissions, runtime, signal });
         diagnostics.static = checked;
         if (checked.decision !== 'dynamic')
@@ -130,6 +133,8 @@ export async function reviewDynamic(
           latest.request.tool,
           latest.scope,
           latest.config,
+          [],
+          { runtime: latest.runtime, action: latest.request.action },
         );
         latest.request.scripts = latestScripts;
         const latestGate = await gate(latest.request, { ...latest, signal });
